@@ -1,0 +1,137 @@
+---
+title: "Hotel Booking Cancellations"
+author: "Magnus Egdal Nielsen"
+date: "2025-10-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+br <- read.csv("march.csv", stringsAsFactors = TRUE)
+# str(br)
+# names(Filter(is.factor, br))
+br <- br[, !sapply(br, is.factor) | (names(br) %in% c("Final.Four.", "Seed", "Post.Season.Tournament"))]
+names(Filter(is.factor, br))
+
+```
+
+```{r}
+# br <- subset(br, select = -c(`Top.12.in.AP.Top.25.During.Week.6.`, `Tournament.Championship.`,`Tournament.Winner.`,`Vulnerable.Top.2.Seed.`,`Post.Season.Tournament.Sorting.Index`,`Post.Season.Tournament`))
+# br <- subset(br, select = -c(`Current.Coach`, `Full.Team.Name`))
+
+br <- subset(br, Season > 2010)
+br <- subset(br, Season != 2020)
+br <- subset(br, Post.Season.Tournament == "March Madness")
+br$Post.Season.Tournament <- NULL
+
+
+br <- br[, colSums(is.na(br)) == 0]
+cols <- grepl("Raw", names(br))
+br <- br[, !cols]
+
+cols <- grepl("Rank", names(br))
+br <- br[, !cols]
+
+br <- br[, colSums(is.na(br)) <= 1643]
+
+
+
+
+str(br)
+br$Net.Income.Flag = NULL
+
+# br$Net.Current.Coach = NULL
+# br$Full.Team.Name = NULL
+# br$Mapped.ESPN.Team.Name = NULL
+# br$Mapped.Conference.Name = NULL
+# br$Short.Conference.Name = NULL
+# br$Active.Coaching.Length = NULL
+# br$Region = NULL
+
+# #br$Since = NULL
+summary(br)
+
+
+
+write.csv(br, file = "march_cleaned.csv", row.names = FALSE)
+
+```
+
+```{r}
+br_d <- as.data.frame(model.matrix(~ . -1, data = br))
+
+minmax <- function(x){
+  (x - min(x)) / (max(x) - min(x))
+}
+
+br_minmax <- as.data.frame(lapply(br_d, minmax))
+str(br_minmax)
+```
+```{r}
+cluster_minmax <- as.data.frame(lapply(br_minmax,minmax))
+
+summary(cluster_minmax)
+
+Final.Four.yes_backup <- br_minmax$Final.Four.yes
+
+br_minmax$Final.Four.yes <- NULL
+
+br_z <- as.data.frame(lapply(br_minmax, scale))
+
+summary(br_z)
+
+set.seed(12345)
+c6 <- kmeans(br_z, 5)
+c6$size
+c6$centers
+
+br_z$cluster <- c6$cluster
+br_z$Final.Four.yes <- Final.Four.yes_backup
+
+str(br_z)
+
+```
+
+
+```{r}
+
+trainprop <- 0.7
+set.seed(12345)
+train_rows <- sample(1:nrow(br), trainprop*nrow(br))
+br_train <- br[train_rows, ]
+br_test <- br[-train_rows, ]
+summary(br_train$Final.Four.)
+summary(br_test$Final.Four.)
+
+```
+
+```{r}
+m1 <- glm(Final.Four. ~., data = br_train, family = binomial())
+```
+
+
+```{r}
+quarter_pred <- predict(m1, br_test, type = "response")
+library(skimr)
+summary(quarter_pred)
+```
+
+```{r}
+# png("quarter_pred_hist.png", width = 800, height = 600)
+# hist(quarter_pred,
+#      breaks = 30,
+#      main = "Distribution of Predicted Probabilities",
+#      xlab = "Predicted Probability",
+#      col = "skyblue",
+#      border = "white")
+# dev.off()
+library(caret)
+quarter_pred_class <- ifelse(quarter_pred >= 0.3, "Yes", "No")
+cm <- confusionMatrix(as.factor(quarter_pred_class), as.factor(br_test$Final.Four.), 
+                positive = "Yes")
+cm
+```
+
