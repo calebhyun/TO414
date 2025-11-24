@@ -1,29 +1,186 @@
 ---
 title: "GroupProject"
-output: html_document
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
 date: "2025-11-13"
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+
+library(ggplot2)
+library(caret)
+library(class)
+library(neuralnet)
+library(kernlab)
+library(C50)
+library(reshape2)
+library(dplyr) # for function mutate() in y_summary table
+library(knitr) # for kable() in y_summary table
 ```
 
-## R Markdown
+## Step 0 Why?
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+## Step 1 Load Data
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+```{r}
+br <- read.csv("march.csv")
 
-```{r cars}
-summary(cars)
+# Turn All String into Factor
+br[sapply(br, is.character)] <- lapply(br[sapply(br, is.character)], as.factor)
+
+# Rename Final.Four. into usable string "finals"
+br <- br %>%
+  rename(finals = Final.Four.)
+
+br$finals <- ifelse(br$finals == "No", 0, 1)
+
+# Make Summary Table to display No vs Yes quantities
+summary <- br$Final.Four.
+summary <- factor(summary, levels = c("No", "Yes"))
+y_summary <- br |>
+  group_by(finals) |>
+  summarise(Count = n())|>
+  mutate(Percent = round(Count / sum(Count) * 100, 1))
+
+kable(y_summary)
+
 ```
 
-## Including Plots
+## Step 2 Clean Data
 
-You can also embed plots, for example:
+We removed variations of redundant data columns such as Short Conference Name and Mapped Conference Name and Mapped ESPN Team Name. 
+```{r}
+names(Filter(is.factor, br))
+# 1. Remove Unnecessary Factors
+br <- br[, !sapply(br, is.factor) | (names(br) %in% c("finals", "Active.Coaching.Length"))]
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+
+# 2.remove rows before 2010, because much of the data was missing, dropped all rows in 2020 because there was no March Madness tournament that year
+br <- subset(br, Season > 2010) 
+br <- subset(br, Season != 2020)
+
+
+# 3. Remove columns that have more than 1643 empty data rows
+#br <- br[, colSums(is.na(br)) <= 1643]
+
+
+
+# 4. Remove columns with zero variance (all 1s)
+br$Post.Season.Tournament.Sorting.Index <- NULL
+
+# Remove redundant cols
+br$Since <- NULL
+br$Active.Coaching.Length <- NULL
+
+
+# Got rid of columns that have even 1 data row of  n/a
+br <- br[, colSums(is.na(br)) == 0]
+
+
+# Got rid of columns that have “Raw” in them
+cols <- grepl("Raw", names(br))
+br <- br[, !cols]
+
+
+# Got rid of columns that have “Rank” in them
+cols <- grepl("Rank", names(br))
+br <- br[, !cols]
+
+
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+### Make Dummy Variables and Scale Data
+
+```{r}
+br_d <- as.data.frame(model.matrix(~ . -1, data = br))
+minmax <- function(x){
+  (x - min(x)) / (max(x) - min(x))
+}
+
+br_minmax <- as.data.frame(lapply(br_d, minmax))
+str(br_minmax$seed)
+```
+
+
+
+## Step 3 Split Data
+
+```{r}
+trainfac <- 0.5
+set.seed(12345)
+trainrows <- sample(1:nrow(br_minmax), trainfac*nrow(br_minmax))
+
+train <- br_minmax[trainrows, ]
+test <- br_minmax[-trainrows, ]
+
+str(br_minmax$finals)
+train$finals <- factor(train$finals, levels = c(0,1))
+test$finals <- factor(test$finals,  levels = c(0,1))
+```
+
+
+## Step 4 Build Clustering Model
+
+```{r}
+cluster_minmax <- as.data.frame(lapply(br_minmax, minmax))
+#summary(cluster_minmax)
+
+finals_backup <- br_minmax$finals
+
+br_minmax$finals <- NULL
+
+br_z <- as.data.frame(lapply(br_minmax, scale))
+#summary(br_z)
+
+set.seed(12345)
+c6 <- kmeans(br_z, 5)
+c6$size
+c6$centers
+
+br_z$cluster <- c6$cluster
+br_z$finals <- finals_backup
+
+str(br_z)
+```
+
+
+
+## Step 5 Build First Level Models
+
+### Logistic Regression
+
+### K-Nearest Neighbors
+
+TODO:
+```{r}
+knn_pred <- knn(
+  train = train[, -which(names(train) == "finals")],
+  test  = test[, -which(names(test) == "finals")],
+  cl    = train$finals,
+  k     = 103
+)
+
+cm_knn <- confusionMatrix(as.factor(knn_pred), as.factor(test$finals), positive = "1")
+```
+
+
+### Artificial Neural Network
+
+### Support Vector Machine
+
+### Decision Tree
+
+### Randomn Forest
+
+## Step 6 Build Second Level Model- Stacked Model
+
+
+
+
+## Step 7 Model Evaluation
+
+## Step 8 Conclusion
