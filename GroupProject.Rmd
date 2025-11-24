@@ -368,7 +368,7 @@ l2_train <- data.frame(
 # Matrix format: [Predicted No, Actual No] [Predicted No, Actual Yes]
 #                [Predicted Yes, Actual No] [Predicted Yes, Actual Yes]
 # We want to penalize: Predicted No when Actual Yes (False Negative)
-cost_matrix <- matrix(c(0, 200, 1, 0), nrow = 2, byrow = TRUE)
+cost_matrix <- matrix(c(0, 5, 1, 0), nrow = 2, byrow = TRUE)
 colnames(cost_matrix) <- c("No", "Yes")  # Actual classes
 rownames(cost_matrix) <- c("No", "Yes")  # Predicted classes
 # This means: False Negative (Predicted No, Actual Yes) costs 200
