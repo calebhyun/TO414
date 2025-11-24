@@ -126,12 +126,29 @@ table(br_filtered$cluster)
 
 ## 5 Split Train Test (Level 1)
 
-We’ll split the **filtered data (Clusters 1 & 3)** into three sets:
+**Data Flow Summary:**
+1. **Load and Clean Data**: Load raw data, clean columns, remove problematic seasons, create dummy variables, and apply min-max scaling.
+2. **Cluster Analysis**: Perform K-means clustering (k=4) on the scaled data to identify distinct team performance profiles.
+3. **Filter Clusters**: Keep only Clusters 1 and 3 for predictive modeling (removing Clusters 2 and 4).
+4. **Split Data**: Divide the filtered data into:
+   - **Training Set (50%)**: To train Level 1 models
+   - **Validation Set (35%)**: To train the Level 2 (Stacked) model
+   - **Test Set (15%)**: To evaluate ALL models fairly on unseen data
+5. **Upsample Training Set**: Balance the training set by upsampling the minority class ("Yes" - Final Four teams).
+6. **Upsample Validation Set**: Balance the validation set by upsampling the minority class. This ensures the Level 2 model has sufficient examples of both classes to learn from, even though we also use a cost matrix.
+7. **Train Level 1 Models**: Build five models (Logistic Regression, KNN, SVM, Decision Tree, Random Forest) on the upsampled training set.
+8. **Generate Level 1 Predictions**: 
+   - Predict on **upsampled validation set** → used as features for Level 2 training
+   - Predict on **original test set** → used for final evaluation
+9. **Train Level 2 Model**: Build stacked model using Level 1 predictions from validation set, with cost matrix to penalize False Negatives.
+10. **Evaluate**: Test Level 2 model on original test set predictions.
+
+We'll split the **filtered data (Clusters 1 & 3)** into three sets:
 1. **Training Set (50%)**: To train Level 1 models.
 2. **Validation Set (35%)**: To train the Level 2 (Stacked) model.
 3. **Test Set (15%)**: To evaluate ALL models fairly on unseen data.
 
-Given the extreme class imbalance, we will **up-sample** the minority class in the training set only.
+Given the extreme class imbalance (~99% "No", ~1% "Yes"), we will **up-sample** the minority class in the training set. This ensures Level 1 models have sufficient examples of Final Four teams to learn meaningful patterns, rather than just defaulting to predicting "No" for everything.
 
 ```{r}
 set.seed(12345)
@@ -165,7 +182,13 @@ train <- upSample(x = train_raw[, names(train_raw) != "finals"],
 table(train$finals)
 ```
 
-We also **up-sample** the Validation Set. This is CRITICAL. If we train the Level 2 model on the original imbalanced validation set (where 99% are "No"), it will just learn to predict "No" for everything to maximize accuracy, ignoring the minority class signals from the Level 1 models.
+We also **up-sample** the Validation Set. We use **both upsampling and a cost matrix** because they address different aspects of class imbalance:
+
+- **Upsampling** helps the model **LEARN** better patterns from the minority class by providing more examples. Without sufficient examples, the model may struggle to learn meaningful patterns even if it knows to prioritize the minority class.
+
+- **Cost matrix** helps the model **MAKE DECISIONS** that prioritize the minority class by adjusting the decision boundary. It tells the model "predicting 'No' when it's actually 'Yes' is 200x worse than the reverse."
+
+Together, upsampling ensures the model has learned good patterns from both classes, while the cost matrix ensures it applies those patterns in a way that prioritizes finding Final Four teams (even at the cost of more false positives).
 
 ```{r}
 set.seed(12345)
@@ -340,10 +363,16 @@ l2_train <- data.frame(
 )
 
 # Build L2 Model (C5.0 with Cost Matrix)
-# Penalize False Negatives (Missing a Final Four team) 50x more than False Positives
-cost_matrix <- matrix(c(0, 1, 50, 0), nrow = 2, byrow = TRUE)
-colnames(cost_matrix) <- c("No", "Yes")
-rownames(cost_matrix) <- c("No", "Yes")
+# Penalize False Negatives (Missing a Final Four team) more than False Positives
+# IMPORTANT: In C5.0, rows = PREDICTED classes, columns = ACTUAL classes
+# Matrix format: [Predicted No, Actual No] [Predicted No, Actual Yes]
+#                [Predicted Yes, Actual No] [Predicted Yes, Actual Yes]
+# We want to penalize: Predicted No when Actual Yes (False Negative)
+cost_matrix <- matrix(c(0, 200, 1, 0), nrow = 2, byrow = TRUE)
+colnames(cost_matrix) <- c("No", "Yes")  # Actual classes
+rownames(cost_matrix) <- c("No", "Yes")  # Predicted classes
+# This means: False Negative (Predicted No, Actual Yes) costs 200
+#             False Positive (Predicted Yes, Actual No) costs 1
 
 l2_model <- C5.0(
   x = l2_train[, -which(names(l2_train) == "finals")],
@@ -416,75 +445,10 @@ ggplot(final_comparison, aes(x = reorder(Model, Sensitivity), y = Sensitivity, f
 
 ## 11 Summary and Discussion
 
-### 11.1 Model Performance
-We built and tuned five Level 1 models. The stacked model attempts to leverage the strengths of each. By using a cost-sensitive approach in Level 2, we prioritized finding the "Yes" cases (Final Four teams), even if it meant accepting slightly more False Positives.
-
 ## 12 Financial and Business Impact Analysis
-
-### 12.1 The Business Problem
-For an athletic director or a tournament betting syndicate, the cost of missing a potential Final Four team (False Negative) is often higher than betting on a team that fails (False Positive).
-
-### 12.2 Cost-Benefit Framework
-Let's assume:
-- **Benefit (True Positive):** $50,000 (Revenue from deep tournament run / Winning bet payout)
-- **Cost (False Positive):** -$5,000 (Wasted travel budget / Lost bet)
-- **Cost (False Negative):** -$20,000 (Missed opportunity cost / Missed branding exposure)
-
-```{r}
-calculate_net_value <- function(cm) {
-  TP <- cm$table[2, 2]
-  FP <- cm$table[1, 2]
-  FN <- cm$table[2, 1]
-  TN <- cm$table[1, 1]
-  
-  benefit_TP <- 50000
-  cost_FP <- 5000
-  cost_FN <- 20000
-  
-  total_value <- (TP * benefit_TP) - (FP * cost_FP) - (FN * cost_FN)
-  return(total_value)
-}
-
-# Calculate values for best L1 (Random Forest usually performs well) and L2
-val_rf <- calculate_net_value(cm_rf)
-val_l2 <- calculate_net_value(l2_cm)
-
-impact_df <- data.frame(
-  Model = c("Random Forest (L1)", "Stacked L2"),
-  Net_Value = c(val_rf, val_l2)
-)
-
-kable(impact_df)
-```
 
 ## 13 Part 2: Implementing the Prediction Model
 
 ### 13.1 Reverse Bias (Over-Ranking)
-In college sports, teams often have inflated rankings due to "brand name" bias (e.g., Duke or Kentucky might be ranked higher than their stats justify). This is analogous to students lying about alcohol consumption—the "ground truth" (rankings/seedings) might be noisy.
-
-**Impact:**
-If the training labels (Final Four appearances) are truth, but our input features (Pre-tournament rankings) are biased, our model might learn to overvalue "blue blood" programs.
-
-**Mitigation:**
-To account for this, we rely more on "raw" stat columns (Points per Possession, Defensive Efficiency) rather than human-poll rankings (AP Poll) when possible, or build a separate model to detect "Overrated" teams by comparing their poll rank to their efficiency metrics.
 
 ### 13.2 Team Selection for Sponsorship
-Suppose we need to sponsor 2 teams for the tournament, but we cannot afford a team that crashes out early. We want high confidence.
-
-We would take the 5 finalists, run them through our Stacked L2 model, and look at the underlying probability scores. We would select the two teams with the highest predicted probability of "Yes" (Final Four), ensuring we maximize our brand exposure duration.
-
-```{r}
-# Example: Picking top 2 from the test set based on RF probability
-test_w_probs <- data.frame(
-  Actual = test$finals,
-  RF_Prob = rf_probs,
-  L2_Pred = ifelse(l2_pred == "Yes", 1, 0) 
-)
-
-# Sort by probability
-top_picks <- head(test_w_probs[order(-test_w_probs$RF_Prob), ], 5)
-kable(top_picks, caption = "Top 5 Teams by Predicted Probability")
-```
-
-**Recommendation:**
-We select the top two teams from the probability list above. These teams show the strongest statistical profile consistent with historical Final Four contenders.
