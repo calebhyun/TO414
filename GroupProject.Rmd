@@ -102,7 +102,6 @@ minmax <- function(x){
 }
 
 br_minmax <- as.data.frame(lapply(br_d, minmax))
-str(br_minmax$seed)
 ```
 
 
@@ -143,10 +142,27 @@ c6$centers
 
 br_z$cluster <- c6$cluster
 br_z$finals <- finals_backup
-
-str(br_z)
 ```
 
+```{r}
+# Cluster Count / Percentage Horizontal Histogram
+ggplot(br_z, aes(x = factor(cluster))) +
+  geom_bar() +
+  coord_flip() +
+  geom_text(
+    stat = "count",
+    aes(label = paste0(after_stat(count), " (",
+                   round(after_stat(count) / sum(after_stat(count)) * 100, 1),
+                   "%)")),
+    hjust = -0.1,
+    size = 6,
+    fontface = "bold"
+  ) +
+  labs(title = "Cluster Counts",
+       x = "Cluster",
+       y = "Count") +
+expand_limits(y = max(table(br_z$cluster)) * 1.5)
+```
 
 
 ## Step 5 Build First Level Models
