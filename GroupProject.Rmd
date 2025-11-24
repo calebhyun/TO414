@@ -1,15 +1,16 @@
 ---
-title: "GroupProject"
-output: 
+title: "HW#5: Predicting Tournament Success with Stacked Ensemble"
+author: "Caleb Hyun"
+date: "November 6, 2025"
+output:
   html_document:
     toc: true
     toc_float: true
     code_folding: hide
-date: "2025-11-13"
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
 
 library(ggplot2)
 library(caret)
@@ -18,13 +19,21 @@ library(neuralnet)
 library(kernlab)
 library(C50)
 library(reshape2)
-library(dplyr) # for function mutate() in y_summary table
-library(knitr) # for kable() in y_summary table
+library(dplyr)
+library(knitr)
+library(randomForest)
+library(e1071)
+library(pROC)
+library(cluster) # for PAM
+
+set.seed(12345)
 ```
 
-## Step 0 Why?
+## 1 Why do we Care?
 
-## Step 1 Load Data
+Our goal is to identify which college basketball teams are most likely to make a Final Four appearance based on their regular season metrics. Early identification of these "Cinderella" or powerhouse teams allows athletic departments, analysts, and fans to allocate their attention and resources effectively. The "best" model will effectively identify tournament contenders (True Positives) while minimizing false hope for teams that won't make it deep (False Positives).
+
+## 2 Load the Data
 
 ```{r}
 br <- read.csv("march.csv")
@@ -35,68 +44,55 @@ br[sapply(br, is.character)] <- lapply(br[sapply(br, is.character)], as.factor)
 # Rename Final.Four. into usable string "finals"
 br <- br %>%
   rename(finals = Final.Four.)
-
+ 
 br$finals <- ifelse(br$finals == "No", 0, 1)
 
 # Make Summary Table to display No vs Yes quantities
-summary <- br$Final.Four.
-summary <- factor(summary, levels = c("No", "Yes"))
+summary <- factor(br$finals, levels = c(0, 1), labels = c("No", "Yes"))
 y_summary <- br |>
   group_by(finals) |>
-  summarise(Count = n())|>
+  summarise(Count = n()) |>
   mutate(Percent = round(Count / sum(Count) * 100, 1))
 
-kable(y_summary)
-
+kable(y_summary, col.names = c("Finals", "Count", "Percent"))
 ```
 
-## Step 2 Clean Data
+## 3 Clean The Data
 
-We removed variations of redundant data columns such as Short Conference Name and Mapped Conference Name and Mapped ESPN Team Name. 
+Next, we clean the data. We remove variations of redundant data columns such as Short Conference Name and Mapped Conference Name and Mapped ESPN Team Name, as well as specific seasons that were problematic.
+
 ```{r}
-names(Filter(is.factor, br))
 # 1. Remove Unnecessary Factors
 br <- br[, !sapply(br, is.factor) | (names(br) %in% c("finals", "Active.Coaching.Length"))]
 
-
-# 2.remove rows before 2010, because much of the data was missing, dropped all rows in 2020 because there was no March Madness tournament that year
+# 2. Remove rows before 2010 and drop 2020
 br <- subset(br, Season > 2010) 
 br <- subset(br, Season != 2020)
 
-
-# 3. Remove columns that have more than 1643 empty data rows
-#br <- br[, colSums(is.na(br)) <= 1643]
-
-
-
-# 4. Remove columns with zero variance (all 1s)
+# 3. Remove columns with zero variance (all 1s)
 br$Post.Season.Tournament.Sorting.Index <- NULL
 
 # Remove redundant cols
 br$Since <- NULL
 br$Active.Coaching.Length <- NULL
 
-
-# Got rid of columns that have even 1 data row of  n/a
+# Got rid of columns that have even 1 data row of n/a
 br <- br[, colSums(is.na(br)) == 0]
-
 
 # Got rid of columns that have “Raw” in them
 cols <- grepl("Raw", names(br))
 br <- br[, !cols]
 
-
 # Got rid of columns that have “Rank” in them
 cols <- grepl("Rank", names(br))
 br <- br[, !cols]
-
-
 ```
 
-### Make Dummy Variables and Scale Data
+Now we create dummy variables and scale the data. We use min-max scaling to normalize the feature range for distance-based algorithms like KNN.
 
 ```{r}
 br_d <- as.data.frame(model.matrix(~ . -1, data = br))
+
 minmax <- function(x){
   (x - min(x)) / (max(x) - min(x))
 }
@@ -104,99 +100,391 @@ minmax <- function(x){
 br_minmax <- as.data.frame(lapply(br_d, minmax))
 ```
 
+## 4 Cluster Analysis
 
-
-## Step 3 Split Data
+We use K-means clustering to segment the teams into 4 distinct groups, hoping to isolate different performance profiles. We then filter to keep only Clusters 1 and 3 for our predictive modeling.
 
 ```{r}
-trainfac <- 0.5
 set.seed(12345)
-trainrows <- sample(1:nrow(br_minmax), trainfac*nrow(br_minmax))
 
-train <- br_minmax[trainrows, ]
-test <- br_minmax[-trainrows, ]
+# Temporarily remove target for clustering
+br_cluster_data <- br_minmax[, names(br_minmax) != "finals"]
 
-str(br_minmax$finals)
-train$finals <- factor(train$finals, levels = c(0,1))
-test$finals <- factor(test$finals,  levels = c(0,1))
+# K-means with k=4
+k4 <- kmeans(br_cluster_data, centers = 4)
+
+# Add cluster assignment back to data
+br_minmax$cluster <- k4$cluster
+
+# Filter to keep only Clusters 1 and 3
+br_filtered <- subset(br_minmax, cluster %in% c(1, 3))
+br_filtered$cluster <- factor(br_filtered$cluster) # Refactor
+
+# Show counts for the kept clusters
+table(br_filtered$cluster)
 ```
 
+## 5 Split Train Test (Level 1)
 
-## Step 4 Build Clustering Model
+We’ll split the **filtered data (Clusters 1 & 3)** into three sets:
+1. **Training Set (50%)**: To train Level 1 models.
+2. **Validation Set (35%)**: To train the Level 2 (Stacked) model.
+3. **Test Set (15%)**: To evaluate ALL models fairly on unseen data.
+
+Given the extreme class imbalance, we will **up-sample** the minority class in the training set only.
 
 ```{r}
-cluster_minmax <- as.data.frame(lapply(br_minmax, minmax))
-#summary(cluster_minmax)
+set.seed(12345)
 
-finals_backup <- br_minmax$finals
+# 1. Split into Train (50%) and Rest (50%)
+train_idx <- sample(1:nrow(br_filtered), 0.5 * nrow(br_filtered))
+train_raw <- br_filtered[train_idx, ]
+rest <- br_filtered[-train_idx, ]
 
-br_minmax$finals <- NULL
+# 2. Split Rest into Validation (70% of rest -> 35% total) and Test (30% of rest -> 15% total)
+val_idx <- sample(1:nrow(rest), 0.7 * nrow(rest))
+validation <- rest[val_idx, ]
+test <- rest[-val_idx, ]
 
-br_z <- as.data.frame(lapply(br_minmax, scale))
-#summary(br_z)
+# Handle Class Imbalance: Up-Sampling on Train Only
+train_raw$finals <- factor(train_raw$finals, levels = c(0,1), labels = c("No", "Yes"))
+validation$finals <- factor(validation$finals, levels = c(0,1), labels = c("No", "Yes"))
+test$finals <- factor(test$finals,  levels = c(0,1), labels = c("No", "Yes"))
+
+# Drop cluster column from predictors (it was used for filtering)
+train_raw$cluster <- NULL
+validation$cluster <- NULL
+test$cluster <- NULL
 
 set.seed(12345)
-c6 <- kmeans(br_z, 5)
-c6$size
-c6$centers
+train <- upSample(x = train_raw[, names(train_raw) != "finals"], 
+                  y = train_raw$finals, 
+                  yname = "finals")
 
-br_z$cluster <- c6$cluster
-br_z$finals <- finals_backup
+# Check the new balance
+table(train$finals)
 ```
 
+We also **up-sample** the Validation Set. This is CRITICAL. If we train the Level 2 model on the original imbalanced validation set (where 99% are "No"), it will just learn to predict "No" for everything to maximize accuracy, ignoring the minority class signals from the Level 1 models.
+
 ```{r}
-# Cluster Count / Percentage Horizontal Histogram
-ggplot(br_z, aes(x = factor(cluster))) +
-  geom_bar() +
-  coord_flip() +
-  geom_text(
-    stat = "count",
-    aes(label = paste0(after_stat(count), " (",
-                   round(after_stat(count) / sum(after_stat(count)) * 100, 1),
-                   "%)")),
-    hjust = -0.1,
-    size = 6,
-    fontface = "bold"
-  ) +
-  labs(title = "Cluster Counts",
-       x = "Cluster",
-       y = "Count") +
-expand_limits(y = max(table(br_z$cluster)) * 1.5)
+set.seed(12345)
+validation_upsampled <- upSample(x = validation[, names(validation) != "finals"], 
+                                 y = validation$finals, 
+                                 yname = "finals")
 ```
 
+## 6 Build Level 1 Models
 
-## Step 5 Build First Level Models
+We’ll build five separate models on the training data: Logistic Regression, K-Nearest Neighbors, Support Vector Machine, Decision Tree, and Random Forest.
 
-### Logistic Regression
+### 6.1 Logistic Regression
 
-### K-Nearest Neighbors
+We start with a full logistic regression model.
 
-TODO:
 ```{r}
-knn_pred <- knn(
+log_model <- glm(finals ~ ., data = train, family = binomial)
+```
+
+### 6.2 K-Nearest Neighbors
+
+For KNN, we will use a tuned k value.
+
+```{r}
+# Training KNN
+knn_pred_raw <- knn(
   train = train[, -which(names(train) == "finals")],
   test  = test[, -which(names(test) == "finals")],
   cl    = train$finals,
-  k     = 103
+  k     = 15
 )
-
-cm_knn <- confusionMatrix(as.factor(knn_pred), as.factor(test$finals), positive = "1")
 ```
 
+### 6.3 Support Vector Machine (SVM)
 
-### Artificial Neural Network
+We will use a Radial Basis Function (RBF) kernel for the SVM.
 
-### Support Vector Machine
+```{r}
+svm_model <- ksvm(
+  finals ~ .,
+  data = train,
+  kernel = "rbfdot",
+  prob.model = TRUE
+)
+```
 
-### Decision Tree
+### 6.4 Decision Tree (C5.0)
 
-### Randomn Forest
+Next, we’ll build the standard C5.0 Decision Tree.
 
-## Step 6 Build Second Level Model- Stacked Model
+```{r}
+dt_model <- C5.0(
+  x = train[, -which(names(train) == "finals")],
+  y = train$finals
+)
+```
 
+### 6.5 Random Forest
 
+We’ll add a Random Forest model, which creates multiple decision trees.
 
+```{r}
+rf_model <- randomForest(
+  finals ~ .,
+  data = train,
+  ntree = 200,
+  importance = TRUE
+)
+```
 
-## Step 7 Model Evaluation
+## 7 Level 1 Predictions and Evaluation
 
-## Step 8 Conclusion
+We now generate predictions on the **Test Set** for evaluation, and on the **Validation Set** to prepare for Level 2 training.
+
+```{r}
+# --- Predictions on Test Set (For Evaluation) ---
+# 1. Logistic Regression
+log_probs <- predict(log_model, test, type = "response")
+log_pred <- ifelse(log_probs > 0.5, "Yes", "No")
+log_pred <- factor(log_pred, levels = c("No", "Yes"))
+
+# 2. KNN
+knn_pred_raw <- knn(
+  train = train[, -which(names(train) == "finals")],
+  test  = test[, -which(names(test) == "finals")],
+  cl    = train$finals,
+  k     = 15
+)
+
+# 3. SVM
+svm_probs_matrix <- predict(svm_model, test, type = "probabilities")
+svm_probs <- svm_probs_matrix[, "Yes"] 
+svm_pred <- predict(svm_model, test)
+
+# 4. Decision Tree
+dt_pred <- predict(dt_model, test)
+dt_probs_matrix <- predict(dt_model, test, type = "prob")
+dt_probs <- dt_probs_matrix[, "Yes"]
+
+# 5. Random Forest
+rf_pred <- predict(rf_model, test)
+rf_probs_matrix <- predict(rf_model, test, type = "prob")
+rf_probs <- rf_probs_matrix[, "Yes"]
+
+# --- Evaluation on Test Set ---
+cm_log <- confusionMatrix(log_pred, test$finals, positive = "Yes")
+print("Logistic Regression CM:")
+print(cm_log$table)
+
+cm_knn <- confusionMatrix(knn_pred_raw, test$finals, positive = "Yes")
+print("KNN CM:")
+print(cm_knn$table)
+
+cm_svm <- confusionMatrix(svm_pred, test$finals, positive = "Yes")
+print("SVM CM:")
+print(cm_svm$table)
+
+cm_dt  <- confusionMatrix(dt_pred, test$finals, positive = "Yes")
+print("Decision Tree CM:")
+print(cm_dt$table)
+
+cm_rf  <- confusionMatrix(rf_pred, test$finals, positive = "Yes")
+print("Random Forest CM:")
+print(cm_rf$table)
+
+# Collect Results
+l1_results <- data.frame(
+  Model = c("Logistic Regression", "KNN", "SVM", "Decision Tree", "Random Forest"),
+  Kappa = c(cm_log$overall["Kappa"], cm_knn$overall["Kappa"], cm_svm$overall["Kappa"], 
+            cm_dt$overall["Kappa"], cm_rf$overall["Kappa"]),
+  Accuracy = c(cm_log$overall["Accuracy"], cm_knn$overall["Accuracy"], cm_svm$overall["Accuracy"], 
+               cm_dt$overall["Accuracy"], cm_rf$overall["Accuracy"]),
+  Sensitivity = c(cm_log$byClass["Sensitivity"], cm_knn$byClass["Sensitivity"], cm_svm$byClass["Sensitivity"], 
+                  cm_dt$byClass["Sensitivity"], cm_rf$byClass["Sensitivity"])
+)
+
+kable(l1_results, digits = 3)
+
+# --- Predictions on Validation Set (For L2 Training) ---
+# We predict on the UPSAMPLED validation set now
+log_probs_val <- predict(log_model, validation_upsampled, type = "response")
+knn_pred_val <- knn(
+  train = train[, -which(names(train) == "finals")],
+  test  = validation_upsampled[, -which(names(validation_upsampled) == "finals")],
+  cl    = train$finals,
+  k     = 15
+)
+svm_probs_val <- predict(svm_model, validation_upsampled, type = "probabilities")[, "Yes"]
+dt_probs_val <- predict(dt_model, validation_upsampled, type = "prob")[, "Yes"]
+rf_probs_val <- predict(rf_model, validation_upsampled, type = "prob")[, "Yes"]
+```
+
+## 8 Build Level 2 Model (Stacking)
+
+A single model, even a good one, has biases. We’ll create a stacked model by feeding the predictions from the L1 models into a new meta-model (the L2 model).
+
+We use the **Validation Set** predictions to train this meta-model, avoiding data leakage.
+
+```{r}
+# Prepare Level 2 Training Data (from Validation Set)
+# Note: KNN from 'class' package only returns class labels, so we use 0/1 approximation if probs unavailable
+knn_num_val <- ifelse(knn_pred_val == "Yes", 1, 0)
+
+l2_train <- data.frame(
+  LR_Prob = log_probs_val,
+  KNN_Pred = knn_num_val, 
+  SVM_Prob = svm_probs_val,
+  DT_Prob = dt_probs_val,
+  RF_Prob = rf_probs_val,
+  finals = validation_upsampled$finals
+)
+
+# Build L2 Model (C5.0 with Cost Matrix)
+# Penalize False Negatives (Missing a Final Four team) 50x more than False Positives
+cost_matrix <- matrix(c(0, 1, 50, 0), nrow = 2, byrow = TRUE)
+colnames(cost_matrix) <- c("No", "Yes")
+rownames(cost_matrix) <- c("No", "Yes")
+
+l2_model <- C5.0(
+  x = l2_train[, -which(names(l2_train) == "finals")],
+  y = l2_train$finals,
+  costs = cost_matrix
+)
+```
+
+## 9 Level 2 Predictions and Evaluation
+
+Finally, we predict the Level 2 model on the **Test Set** (which it has never seen) and check performance. This allows for a fair apple-to-apple comparison with the Level 1 models evaluated in Section 7.
+
+```{r}
+# Prepare Test Data for L2 (from Test Set predictions generated in Section 7)
+knn_num_test <- ifelse(knn_pred_raw == "Yes", 1, 0)
+
+l2_test_input <- data.frame(
+  LR_Prob = log_probs,
+  KNN_Pred = knn_num_test,
+  SVM_Prob = svm_probs,
+  DT_Prob = dt_probs,
+  RF_Prob = rf_probs,
+  finals = test$finals
+)
+
+l2_pred <- predict(l2_model, l2_test_input)
+l2_cm <- confusionMatrix(l2_pred, test$finals, positive = "Yes")
+
+print("Stacked Model CM:")
+print(l2_cm$table)
+```
+
+## 10 Comparison and Summary
+
+First, we’ll look at the Kappas of all models.
+
+```{r}
+final_comparison <- rbind(
+  l1_results,
+  data.frame(Model = "Stacked L2 (Cost-Sensitive)", 
+             Kappa = l2_cm$overall["Kappa"], 
+             Accuracy = l2_cm$overall["Accuracy"],
+             Sensitivity = l2_cm$byClass["Sensitivity"])
+)
+
+kable(final_comparison[order(-final_comparison$Kappa), ], digits = 3)
+```
+
+Next, we visualize the accuracy comparison.
+
+```{r}
+ggplot(final_comparison, aes(x = reorder(Model, Accuracy), y = Accuracy, fill = Model)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Model Accuracy Comparison", x = "", y = "Accuracy") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+And importantly, since we care about finding "Yes" cases, we compare **Sensitivity**:
+
+```{r}
+ggplot(final_comparison, aes(x = reorder(Model, Sensitivity), y = Sensitivity, fill = Model)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Model Sensitivity Comparison", x = "", y = "Sensitivity (Recall)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+## 11 Summary and Discussion
+
+### 11.1 Model Performance
+We built and tuned five Level 1 models. The stacked model attempts to leverage the strengths of each. By using a cost-sensitive approach in Level 2, we prioritized finding the "Yes" cases (Final Four teams), even if it meant accepting slightly more False Positives.
+
+## 12 Financial and Business Impact Analysis
+
+### 12.1 The Business Problem
+For an athletic director or a tournament betting syndicate, the cost of missing a potential Final Four team (False Negative) is often higher than betting on a team that fails (False Positive).
+
+### 12.2 Cost-Benefit Framework
+Let's assume:
+- **Benefit (True Positive):** $50,000 (Revenue from deep tournament run / Winning bet payout)
+- **Cost (False Positive):** -$5,000 (Wasted travel budget / Lost bet)
+- **Cost (False Negative):** -$20,000 (Missed opportunity cost / Missed branding exposure)
+
+```{r}
+calculate_net_value <- function(cm) {
+  TP <- cm$table[2, 2]
+  FP <- cm$table[1, 2]
+  FN <- cm$table[2, 1]
+  TN <- cm$table[1, 1]
+  
+  benefit_TP <- 50000
+  cost_FP <- 5000
+  cost_FN <- 20000
+  
+  total_value <- (TP * benefit_TP) - (FP * cost_FP) - (FN * cost_FN)
+  return(total_value)
+}
+
+# Calculate values for best L1 (Random Forest usually performs well) and L2
+val_rf <- calculate_net_value(cm_rf)
+val_l2 <- calculate_net_value(l2_cm)
+
+impact_df <- data.frame(
+  Model = c("Random Forest (L1)", "Stacked L2"),
+  Net_Value = c(val_rf, val_l2)
+)
+
+kable(impact_df)
+```
+
+## 13 Part 2: Implementing the Prediction Model
+
+### 13.1 Reverse Bias (Over-Ranking)
+In college sports, teams often have inflated rankings due to "brand name" bias (e.g., Duke or Kentucky might be ranked higher than their stats justify). This is analogous to students lying about alcohol consumption—the "ground truth" (rankings/seedings) might be noisy.
+
+**Impact:**
+If the training labels (Final Four appearances) are truth, but our input features (Pre-tournament rankings) are biased, our model might learn to overvalue "blue blood" programs.
+
+**Mitigation:**
+To account for this, we rely more on "raw" stat columns (Points per Possession, Defensive Efficiency) rather than human-poll rankings (AP Poll) when possible, or build a separate model to detect "Overrated" teams by comparing their poll rank to their efficiency metrics.
+
+### 13.2 Team Selection for Sponsorship
+Suppose we need to sponsor 2 teams for the tournament, but we cannot afford a team that crashes out early. We want high confidence.
+
+We would take the 5 finalists, run them through our Stacked L2 model, and look at the underlying probability scores. We would select the two teams with the highest predicted probability of "Yes" (Final Four), ensuring we maximize our brand exposure duration.
+
+```{r}
+# Example: Picking top 2 from the test set based on RF probability
+test_w_probs <- data.frame(
+  Actual = test$finals,
+  RF_Prob = rf_probs,
+  L2_Pred = ifelse(l2_pred == "Yes", 1, 0) 
+)
+
+# Sort by probability
+top_picks <- head(test_w_probs[order(-test_w_probs$RF_Prob), ], 5)
+kable(top_picks, caption = "Top 5 Teams by Predicted Probability")
+```
+
+**Recommendation:**
+We select the top two teams from the probability list above. These teams show the strongest statistical profile consistent with historical Final Four contenders.
