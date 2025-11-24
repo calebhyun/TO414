@@ -1,0 +1,745 @@
+---
+title: "Clustering models"
+author: "Magnus Egdal Nielsen"
+date: "2025-11-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+
+suppressWarnings({
+library(skimr)
+library(caret)
+library(ggplot2)
+library(dplyr)
+library(tibble)
+library(fastDummies)
+library(reshape2)
+library(tidyr)
+library(vip)
+library(C50)
+library(neuralnet)
+library(class)
+library(kernlab)
+library(randomForest)
+})
+
+```
+
+## Building the sequential models
+
+All models should be run twice - once on each cluster, to maximize potential value that we get out of each cluster.
+
+```{r}
+ap_clusters$alc <- factor(ap_clusters$alc, levels = c(0, 1))
+
+# Split by cluster
+cluster1_data <- subset(ap_clusters, cluster == 1)
+cluster2_data <- subset(ap_clusters, cluster == 2)
+```
+
+# Step 5B: Predicting sequential models
+
+### Logistic regression on cluster
+
+```{r}
+set.seed(12345)
+trainprop <- 0.5
+
+log_idx1 <- sample(1:nrow(cluster1_data), trainprop * nrow(cluster1_data))
+log_c1_train <- cluster1_data[log_idx1, ]
+log_c1_test  <- cluster1_data[-log_idx1, ]
+
+log_idx2 <- sample(1:nrow(cluster2_data), trainprop * nrow(cluster2_data))
+log_c2_train <- cluster2_data[log_idx2, ]
+log_c2_test <- cluster2_data[-log_idx2, ]
+
+length(log_c1_train)
+length(log_c2_train)
+
+```
+
+
+```{r}
+
+# Logistic regression on each cluster (drop cluster as predictor)
+log1 <- glm(alc ~ . - cluster, data = log_c1_train, family = binomial)
+log2 <- glm(alc ~ . - cluster, data = log_c2_train, family = binomial)
+
+summary(log1)
+summary(log2)
+
+
+```
+
+### Predicting logistic regression on cluster
+
+```{r}
+# Cluster 1 predictions
+log1_probs <- predict(log1, log_c1_test, type = "response")
+
+# Cluster 2 predictions
+log2_probs <- predict(log2, log_c2_test, type = "response")
+
+log1_pred <- ifelse(log1_probs > 0.5, 1, 0)
+log2_pred <- ifelse(log2_probs > 0.5, 1, 0)
+
+log1_pred <- factor(log1_pred, levels = c(0,1))
+log2_pred <- factor(log2_pred, levels = c(0,1))
+
+true1 <- factor(log_c1_test$alc, levels = c(0,1))
+true2 <- factor(log_c2_test$alc, levels = c(0,1))
+
+cm_log1 <- confusionMatrix(log1_pred, true1, positive = "1")
+cm_log2 <- confusionMatrix(log2_pred, true2, positive = "1")
+
+cm_log1
+cm_log2
+
+length(log1_probs)
+length(log2_probs)
+```
+Running logistic regressions on the clusters seem to have really high predictive power. The models gain both a high degree of accuracy, and sensitivity, which is important to make sure we can catch those students with alcohol problems.
+
+### Predicting KNN on cluster
+
+Next we move on to the KNN model:
+
+```{r}
+## 1. Base data with alc + cluster
+# ap_clusters should already exist from your PAM step
+ap_clusters$alc <- factor(ap_clusters$alc, levels = c(0,1))
+
+# split into clusters
+cluster1 <- subset(ap_clusters, cluster == 1)
+cluster2 <- subset(ap_clusters, cluster == 2)
+
+set.seed(12345)
+trainprop <- 0.5
+
+idx1 <- sample(1:nrow(cluster1), trainprop * nrow(cluster1))
+c1_train <- cluster1[idx1, ]
+c1_test  <- cluster1[-idx1, ]
+
+idx2 <- sample(1:nrow(cluster2), trainprop * nrow(cluster2))
+c2_train <- cluster2[idx2, ]
+c2_test <- cluster2[-idx2, ]
+
+
+```
+
+```{r}
+# drop cluster from predictors
+c1_train_x_raw <- c1_train[, setdiff(names(c1_train), c("alc","cluster"))]
+c1_test_x_raw  <- c1_test[,  setdiff(names(c1_test),  c("alc","cluster"))]
+
+# scale using training mean/SD
+scale_c1 <- scale(c1_train_x_raw)
+c1_train_x <- as.data.frame(scale_c1)
+
+c1_test_x <- as.data.frame(scale(
+  c1_test_x_raw,
+  center = attr(scale_c1, "scaled:center"),
+  scale  = attr(scale_c1, "scaled:scale")
+))
+
+# target
+c1_train_y <- c1_train$alc
+c1_test_y  <- c1_test$alc
+
+# sanity check
+nrow(c1_train_x); length(c1_train_y)   # must match
+nrow(c1_test_x);  length(c1_test_y)
+
+```
+```{r}
+# drop cluster from predictors
+c2_train_x_raw <- c2_train[, setdiff(names(c2_train), c("alc","cluster"))]
+c2_test_x_raw  <- c2_test[,  setdiff(names(c2_test),  c("alc","cluster"))]
+
+# scale using training mean/SD
+scale_c2 <- scale(c2_train_x_raw)
+c2_train_x <- as.data.frame(scale_c2)
+
+c2_test_x <- as.data.frame(scale(
+  c2_test_x_raw,
+  center = attr(scale_c2, "scaled:center"),
+  scale  = attr(scale_c2, "scaled:scale")
+))
+
+# target
+c2_train_y <- c2_train$alc
+c2_test_y  <- c2_test$alc
+
+# sanity check
+nrow(c2_train_x); length(c2_train_y)   # must match
+nrow(c2_test_x);  length(c2_test_y)
+
+```
+```{r}
+# Make sure KNN labels are Low/High
+c1_train_y_knn <- factor(ifelse(c1_train_y == 1, "High", "Low"), levels = c("Low","High"))
+c1_test_y_knn  <- factor(ifelse(c1_test_y  == 1, "High", "Low"), levels = c("Low","High"))
+
+# Find best K (unchanged)
+k_values <- 1:40
+sens1 <- numeric(length(k_values))
+
+for (i in seq_along(k_values)) {
+  k <- k_values[i]
+  
+  pred_k <- knn(
+    train = c1_train_x,
+    test  = c1_test_x,
+    cl    = c1_train_y_knn,
+    k     = k
+  )
+  
+  cm <- confusionMatrix(pred_k, c1_test_y_knn, positive = "High")
+  sens1[i] <- cm$byClass["Sensitivity"]
+}
+
+best_k1 <- k_values[which.max(sens1)]
+best_k1
+
+c1_knn_pred <- knn(
+  train = c1_train_x,
+  test  = c1_test_x,
+  cl    = c1_train_y_knn,
+  k     = best_k1,
+  prob  = TRUE
+)
+
+# Extract probability of the predicted class
+vote <- attr(c1_knn_pred, "prob")
+
+# Convert to P(High)
+c1_knn_prob_high <- ifelse(
+  c1_knn_pred == "High",
+  vote,
+  1 - vote
+)
+
+cm_knn1 <- confusionMatrix(c1_knn_pred, c1_test_y_knn, positive = "High")
+cm_knn1
+
+```
+```{r}
+# Make sure KNN labels are Low/High
+c2_train_y_knn <- factor(ifelse(c2_train_y == 1, "High", "Low"), levels = c("Low","High"))
+c2_test_y_knn  <- factor(ifelse(c2_test_y  == 1, "High", "Low"), levels = c("Low","High"))
+
+# Find best K (unchanged)
+k_values <- 1:40
+sens2 <- numeric(length(k_values))
+
+for (i in seq_along(k_values)) {
+  k <- k_values[i]
+  
+  pred_k <- knn(
+    train = c2_train_x,
+    test  = c2_test_x,
+    cl    = c2_train_y_knn,
+    k     = k
+  )
+  
+  cm <- confusionMatrix(pred_k, c2_test_y_knn, positive = "High")
+  sens2[i] <- cm$byClass["Sensitivity"]
+}
+
+best_k2 <- k_values[which.max(sens2)]
+best_k2
+
+c2_knn_pred <- knn(
+  train = c2_train_x,
+  test  = c2_test_x,
+  cl    = c2_train_y_knn,
+  k     = best_k2,
+  prob  = TRUE
+)
+
+# Extract probability of the predicted class
+vote <- attr(c2_knn_pred, "prob")
+
+# Convert to P(High)
+c2_knn_prob_high <- ifelse(
+  c2_knn_pred == "High",
+  vote,
+  1 - vote
+)
+
+cm_knn2 <- confusionMatrix(c1_knn_pred, c1_test_y_knn, positive = "High")
+cm_knn2
+```
+KNN is also a very good predictor when layered over the clusters, with high accuracy and sensitivity in both cases.
+
+### Predicting ANN on clusters
+
+We move on to the ANN model.
+
+```{r}
+table(c1_train_y); table(c1_test_y)
+table(c2_train_y); table(c2_test_y)
+```
+
+```{r}
+## numeric target for ANN
+c1_train_y_num <- ifelse(c1_train_y == "1", 1, 0)
+
+## build formula using the column names of c1_train_x
+f_ann1 <- as.formula(
+  paste("alc_num ~", paste(names(c1_train_x), collapse = " + "))
+)
+
+## training data for neuralnet = predictors + numeric target
+c1_train_ann <- cbind(c1_train_x, alc_num = c1_train_y_num)
+
+set.seed(12345)
+ann1 <- neuralnet(
+  f_ann1,
+  data    = c1_train_ann,
+  hidden  = 1,          # you can try 2,3 etc.
+  stepmax = 1e6
+)
+```
+
+```{r}
+# probabilities
+ann1_probs <- as.vector(compute(ann1, c1_test_x)$net.result)
+
+# class predictions at threshold 0.5
+ann1_pred <- ifelse(ann1_probs > 0.5, 1, 0)
+
+ann1_pred_fac <- factor(ann1_pred, levels = c(0,1))
+true1         <- factor(ifelse(c1_test_y == "1", 1, 0), levels = c(0,1))
+
+cm_ann1 <- confusionMatrix(ann1_pred_fac, true1, positive = "1")
+cm_ann1
+```
+```{r}
+## numeric target
+c2_train_y_num <- ifelse(c2_train_y == "1", 1, 0)
+
+## formula
+f_ann2 <- as.formula(
+  paste("alc_num ~", paste(names(c2_train_x), collapse = " + "))
+)
+
+## training data
+c2_train_ann <- cbind(c2_train_x, alc_num = c2_train_y_num)
+
+set.seed(12345)
+ann2 <- neuralnet(
+  f_ann2,
+  data    = c2_train_ann,
+  hidden  = 1,
+  stepmax = 1e6
+)
+
+# predictions
+ann2_probs <- as.vector(compute(ann2, c2_test_x)$net.result)
+ann2_pred  <- ifelse(ann2_probs > 0.5, 1, 0)
+
+ann2_pred_fac <- factor(ann2_pred, levels = c(0,1))
+true2         <- factor(ifelse(c2_test_y == "1", 1, 0), levels = c(0,1))
+
+cm_ann2 <- confusionMatrix(ann2_pred_fac, true2, positive = "1")
+cm_ann2
+
+```
+Predictive power in cluster 1 seems okay, however predictive power in cluster 2 is a bit more shaky, especially compared to logistic regression or KNN models. 
+Let's move on to SVM.
+
+### Predicting SVM on clusters
+
+```{r}
+# Cluster 1
+c1_train_y_svm <- factor(ifelse(c1_train_y %in% c(1,"1"), "High", "Low"),
+                         levels = c("Low","High"))
+c1_test_y_svm  <- factor(ifelse(c1_test_y  %in% c(1,"1"), "High", "Low"),
+                         levels = c("Low","High"))
+
+# Cluster 2
+c2_train_y_svm <- factor(ifelse(c2_train_y %in% c(1,"1"), "High", "Low"),
+                         levels = c("Low","High"))
+c2_test_y_svm  <- factor(ifelse(c2_test_y  %in% c(1,"1"), "High", "Low"),
+                         levels = c("Low","High"))
+
+```
+
+```{r}
+## ---- Cluster 1 SVM ----
+c1_svm_df <- data.frame(c1_train_x, alc = c1_train_y_svm)
+
+set.seed(12345)
+svm1 <- ksvm(
+  alc ~ .,
+  data       = c1_svm_df,
+  kernel     = "rbfdot",
+  prob.model = TRUE
+)
+
+## ---- Cluster 2 SVM ----
+c2_svm_df <- data.frame(c2_train_x, alc = c2_train_y_svm)
+
+set.seed(12345)
+svm2 <- ksvm(
+  alc ~ .,
+  data       = c2_svm_df,
+  kernel     = "rbfdot",
+  prob.model = TRUE
+)
+```
+
+```{r}
+## Cluster 1
+svm1_pred_class <- predict(svm1, c1_test_x)
+cm_svm1 <- confusionMatrix(svm1_pred_class, c1_test_y_svm, positive = "High")
+cm_svm1
+
+## Cluster 2
+svm2_pred_class <- predict(svm2, c2_test_x)
+cm_svm2 <- confusionMatrix(svm2_pred_class, c2_test_y_svm, positive = "High")
+cm_svm2
+```
+```{r}
+## Cluster 1 probabilities (P(High))
+svm1_probs <- predict(svm1, c1_test_x, type = "probabilities")[, "High"]
+
+## Cluster 2 probabilities (P(High))
+svm2_probs <- predict(svm2, c2_test_x, type = "probabilities")[, "High"]
+```
+
+### Predicting Decision Trees on clusters
+
+```{r}
+## Cluster 1
+c1_dt_train <- c1_train
+c1_dt_test  <- c1_test
+
+# drop columns we don't want as predictors
+c1_dt_train$cluster  <- NULL
+c1_dt_test$cluster   <- NULL
+c1_dt_train$alc_num  <- NULL
+c1_dt_test$alc_num   <- NULL
+
+# ensure alc is factor with levels Low/High
+c1_dt_train$alc <- factor(ifelse(c1_dt_train$alc %in% c(1,"1"), "High", "Low"),
+                          levels = c("Low","High"))
+c1_dt_test$alc  <- factor(ifelse(c1_dt_test$alc  %in% c(1,"1"), "High", "Low"),
+                          levels = c("Low","High"))
+
+## Cluster 2
+c2_dt_train <- c2_train
+c2_dt_test  <- c2_test
+
+c2_dt_train$cluster  <- NULL
+c2_dt_test$cluster   <- NULL
+c2_dt_train$alc_num  <- NULL
+c2_dt_test$alc_num   <- NULL
+
+c2_dt_train$alc <- factor(ifelse(c2_dt_train$alc %in% c(1,"1"), "High", "Low"),
+                          levels = c("Low","High"))
+c2_dt_test$alc  <- factor(ifelse(c2_dt_test$alc  %in% c(1,"1"), "High", "Low"),
+                          levels = c("Low","High"))
+
+```
+
+```{r}
+## ----- Cluster 1 tree -----
+dt1 <- C5.0(alc ~ ., data = c1_dt_train)
+
+## ----- Cluster 2 tree -----
+dt2 <- C5.0(alc ~ ., data = c2_dt_train)
+
+```
+
+```{r}
+plot(dt1)
+```
+```{r}
+plot(dt2)
+```
+```{r}
+## Cluster 1
+dt1_pred <- predict(dt1, c1_dt_test)
+cm_dt1   <- confusionMatrix(dt1_pred, c1_dt_test$alc, positive = "High")
+cm_dt1
+
+## Cluster 2
+dt2_pred <- predict(dt2, c2_dt_test)
+cm_dt2   <- confusionMatrix(dt2_pred, c2_dt_test$alc, positive = "High")
+cm_dt2
+```
+```{r}
+## Cluster 1 probabilities (P(High))
+dt1_probs <- predict(dt1, c1_dt_test, type = "prob")[, "High"]
+
+## Cluster 2 probabilities (P(High))
+dt2_probs <- predict(dt2, c2_dt_test, type = "prob")[, "High"]
+```
+
+The trees are semi-accurate compared to some of the other models. 
+
+### Predicting Random Forest on clusters
+
+```{r}
+
+## ---------- Cluster 1 ----------
+c1_rf_train <- c1_train
+c1_rf_test  <- c1_test
+
+c1_rf_train$cluster <- NULL
+c1_rf_test$cluster  <- NULL
+c1_rf_train$alc_num <- NULL
+c1_rf_test$alc_num  <- NULL
+
+c1_rf_train$alc <- factor(ifelse(c1_rf_train$alc %in% c(1,"1"), "High", "Low"),
+                          levels = c("Low","High"))
+c1_rf_test$alc  <- factor(ifelse(c1_rf_test$alc  %in% c(1,"1"), "High", "Low"),
+                          levels = c("Low","High"))
+
+## ---------- Cluster 2 ----------
+c2_rf_train <- c2_train
+c2_rf_test  <- c2_test
+
+c2_rf_train$cluster <- NULL
+c2_rf_test$cluster  <- NULL
+c2_rf_train$alc_num <- NULL
+c2_rf_test$alc_num  <- NULL
+
+c2_rf_train$alc <- factor(ifelse(c2_rf_train$alc %in% c(1,"1"), "High", "Low"),
+                          levels = c("Low","High"))
+c2_rf_test$alc  <- factor(ifelse(c2_rf_test$alc  %in% c(1,"1"), "High", "Low"),
+                          levels = c("Low","High"))
+
+```
+
+```{r}
+## Choose mtry automatically
+mtry_c1 <- floor(sqrt(ncol(c1_rf_train) - 1))
+mtry_c2 <- floor(sqrt(ncol(c2_rf_train) - 1))
+
+## ---------- Random Forest: Cluster 1 ----------
+set.seed(12345)
+rf1 <- randomForest(
+  alc ~ ., 
+  data = c1_rf_train,
+  ntree = 500,
+  mtry = mtry_c1,
+  importance = TRUE
+)
+
+rf1
+
+## ---------- Random Forest: Cluster 2 ----------
+set.seed(12345)
+rf2 <- randomForest(
+  alc ~ ., 
+  data = c2_rf_train,
+  ntree = 500,
+  mtry = mtry_c2,
+  importance = TRUE
+)
+
+rf2
+
+```
+```{r}
+## ---- Cluster 1 ----
+rf1_pred <- predict(rf1, c1_rf_test)
+cm_rf1 <- confusionMatrix(rf1_pred, c1_rf_test$alc, positive = "High")
+
+## ---- Cluster 2 ----
+rf2_pred <- predict(rf2, c2_rf_test)
+cm_rf2 <- confusionMatrix(rf2_pred, c2_rf_test$alc, positive = "High")
+```
+```{r}
+varImpPlot(rf1, main = "Cluster 1 – RF Variable Importance")
+varImpPlot(rf2, main = "Cluster 2 – RF Variable Importance")
+```
+```{r}
+rf1_probs <- predict(rf1, c1_rf_test, type = "prob")[, "High"]
+rf2_probs <- predict(rf2, c2_rf_test, type = "prob")[, "High"]
+
+```
+
+The random forest model is also semi-accurate. However, we get insight into variable importance, which overall matches what we see in the original cluster analysis.
+
+## Stacking Model
+
+### Building the stacking model
+
+```{r}
+## ----- Cluster 1 test data -----
+stack1 <- data.frame(
+  log = log1_probs,
+  knn = c1_knn_prob_high,
+  ann = ann1_probs,
+  svm = svm1_probs,
+  dt  = dt1_probs,
+  rf  = rf1_probs,
+  actual  = factor(
+    ifelse(c1_test$alc %in% c(1, "1"), "High", "Low"),
+    levels = c("Low", "High")
+  ),
+  cluster = 1
+)
+
+## ----- Cluster 2 test data -----
+stack2 <- data.frame(
+  log = log2_probs,
+  knn = c2_knn_prob_high,
+  ann = ann2_probs,
+  svm = svm2_probs,
+  dt  = dt2_probs,
+  rf  = rf2_probs,
+  actual  = factor(
+    ifelse(c2_test$alc %in% c(1, "1"), "High", "Low"),
+    levels = c("Low", "High")
+  ),
+  cluster = 2
+)
+
+## Combine
+stack_full <- rbind(stack1, stack2)
+str(stack_full)
+head(stack_full)
+table(stack_full$actual)
+```
+```{r}
+set.seed(12345)
+trainprop <- 0.5
+idx <- sample(1:nrow(stack_full), size = floor(trainprop*nrow(stack_full)))
+
+stack_train <- stack_full[idx, ]
+stack_test  <- stack_full[-idx, ]
+
+```
+
+```{r}
+
+stack_model <- C5.0(
+  actual ~ log + knn + ann + svm + dt + rf + cluster,
+  data = stack_train
+)
+
+summary(stack_model)
+
+```
+
+```{r}
+stack_pred_class <- predict(stack_model, stack_test)
+
+cm_stack_cluster <- confusionMatrix(stack_pred_class,
+                            stack_test$actual,
+                            positive = "High")
+cm_stack_cluster
+
+```
+
+# Step 6: Evaluating the models
+
+First I pull all the model metrics - TN, TP, FP, FN, Accuracy, Sensitivity, and Specificity.
+```{r}
+extract_counts <- function(cm, name = NA_character_) {
+  tbl <- cm$table
+  
+  # classes present in both rows and columns
+  classes <- intersect(rownames(tbl), colnames(tbl))
+  if (length(classes) != 2) {
+    stop("Confusion matrix does not look like a 2x2 classification problem.")
+  }
+  
+  # detect positive class
+  if ("High" %in% classes) {
+    pos <- "High"
+  } else if ("1" %in% classes) {
+    pos <- "1"
+  } else if (1 %in% classes) {
+    pos <- 1
+  } else {
+    # fallback: take second level as positive
+    pos <- classes[2]
+  }
+  neg <- setdiff(classes, pos)[1]
+  
+  # counts
+  TP <- tbl[pos, pos]
+  FN <- tbl[neg, pos]
+  FP <- tbl[pos, neg]
+  TN <- tbl[neg, neg]
+  
+  # metrics
+  acc  <- as.numeric(cm$overall["Accuracy"])
+  sens <- as.numeric(cm$byClass["Sensitivity"])
+  spec <- as.numeric(cm$byClass["Specificity"])
+  
+  data.frame(
+    model       = name,
+    TP          = TP,
+    FN          = FN,
+    FP          = FP,
+    TN          = TN,
+    Accuracy    = acc,
+    Sensitivity = sens,
+    Specificity = spec,
+    row.names   = NULL
+  )
+}
+
+```
+
+
+```{r}
+results_c1 <- list(
+  logistic  = extract_counts(cm_log1),
+  knn       = extract_counts(cm_knn1),
+  ann       = extract_counts(cm_ann1),
+  svm       = extract_counts(cm_svm1),
+  dt        = extract_counts(cm_dt1),
+  rf        = extract_counts(cm_rf1),
+  stacked_cluster = extract_counts(cm_stack_cluster)
+)
+
+# Convert named list → single data frame with model column
+results_c1_df <- do.call(rbind, results_c1)
+
+results_c1_df$model <- names(results_c1)
+rownames(results_c1_df) <- NULL
+
+# Reorder columns so model is first
+results_c1_df <- results_c1_df[, c("model", "TP","FN","FP","TN","Accuracy","Sensitivity","Specificity")]
+
+results_c1_df
+```
+
+In the first place, clustering was introduced because the full dataset likely contained heterogeneous student groups with different behavioral and demographic patterns related to alcohol use. This mixed structure made it difficult for any single model to learn stable boundaries, resulting in high sensitivity but very poor specificity before clustering. By applying Gower distance and PAM clustering, we grouped students into more internally consistent segments. Running the models within each cluster allows the algorithms to learn from cleaner, more coherent patterns—reducing noise and improving predictive reliability. In short, clustering lets us tailor the prediction models to the distinct subpopulations hidden inside the dataset, improving performance and interpretability.
+
+Across Cluster 1, most models perform more consistently and more accurately than in the pre-cluster dataset. Sensitivities remain high across models, but unlike before clustering, several models such as logistic regression, ANN, SVM, and Random Forest show meaningfully higher specificity, indicating fewer false positives. This means the models are better at correctly identifying genuinely low-risk students while still capturing most high-risk cases. KNN is the exception: it becomes heavily sensitivity-driven in Cluster 1, overpredicting high consumption and achieving very low specificity. Overall, the improved balance in error rates across most models shows that Cluster 1 provides a more homogeneous student profile, making the classification task easier than in the full mixed dataset.
+
+```{r}
+results_c2 <- list(
+  logistic  = extract_counts(cm_log2),
+  knn       = extract_counts(cm_knn2),
+  ann       = extract_counts(cm_ann2),
+  svm       = extract_counts(cm_svm2),
+  dt        = extract_counts(cm_dt2),
+  rf        = extract_counts(cm_rf2)
+)
+
+# Convert named list → single data frame with model column
+results_c2_df <- do.call(rbind, results_c2)
+
+results_c2_df$model <- names(results_c2)
+rownames(results_c2_df) <- NULL
+
+# Reorder columns so model is first
+results_c2_df <- results_c2_df[, c("model", "TP","FN","FP","TN","Accuracy","Sensitivity","Specificity")]
+
+results_c2_df
+```
