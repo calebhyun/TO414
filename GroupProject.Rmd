@@ -117,70 +117,44 @@ table(br_filtered$cluster)
 2. **Cluster Analysis**: Perform K-means clustering (k=4) on the scaled data to identify distinct team performance profiles.
 3. **Filter Clusters**: Keep only Clusters 1 and 3 for predictive modeling (removing Clusters 2 and 4).
 4. **Split Data**: Divide the filtered data into:
-   - **Training Set (50%)**: To train Level 1 models
-   - **Validation Set (35%)**: To train the Level 2 (Stacked) model
-   - **Test Set (15%)**: To evaluate ALL models fairly on unseen data
-5. **Upsample Training Set**: Balance the training set by upsampling the minority class ("Yes" - Final Four teams).
-6. **Upsample Validation Set**: Balance the validation set by upsampling the minority class. This ensures the Level 2 model has sufficient examples of both classes to learn from, even though we also use a cost matrix.
-7. **Train Level 1 Models**: Build five models (Logistic Regression, KNN, SVM, Decision Tree, Random Forest) on the upsampled training set.
-8. **Generate Level 1 Predictions**: 
-   - Predict on **upsampled validation set** → used as features for Level 2 training
-   - Predict on **original test set** → used for final evaluation
-9. **Train Level 2 Model**: Build stacked model using Level 1 predictions from validation set, with cost matrix to penalize False Negatives.
-10. **Evaluate**: Test Level 2 model on original test set predictions.
+   - **Training Set (70%)**: To train Level 1 models and Level 2 model
+   - **Test Set (30%)**: To evaluate ALL models fairly on unseen data
+5. **Train Level 1 Models**: Build three models (Logistic Regression, Decision Tree, Random Forest) on the training set. KNN and SVM are excluded as they don't handle class imbalance well. We use a cost matrix in Level 2 to handle class imbalance rather than upsampling.
+6. **Generate Level 1 Predictions**: 
+   - Predict on **training set** → used as features for Level 2 training
+   - Predict on **test set** → used for final evaluation
+7. **Train Level 2 Model**: Build stacked model using Level 1 predictions from training set, with cost matrix (10:1) to penalize False Negatives.
+8. **Evaluate**: Test Level 2 model on test set predictions.
 
-We'll split the **filtered data (Clusters 1 & 3)** into three sets:
-1. **Training Set (50%)**: To train Level 1 models.
-2. **Validation Set (35%)**: To train the Level 2 (Stacked) model.
-3. **Test Set (15%)**: To evaluate ALL models fairly on unseen data.
+We'll split the **filtered data (Clusters 1 & 3)** into two sets:
+1. **Training Set (70%)**: To train Level 1 models and the Level 2 (Stacked) model.
+2. **Test Set (30%)**: To evaluate ALL models fairly on unseen data.
 
-Given the extreme class imbalance (~99% "No", ~1% "Yes"), we will **up-sample** the minority class in the training set. This ensures Level 1 models have sufficient examples of Final Four teams to learn meaningful patterns, rather than just defaulting to predicting "No" for everything.
+Given the extreme class imbalance (~99% "No", ~1% "Yes"), we will rely on the **cost matrix** in Level 2 to handle the imbalance, rather than upsampling. This keeps the training distribution similar to the test distribution, which may improve generalization.
 
 ```{r}
 set.seed(12345)
 
-train_idx <- sample(1:nrow(br_filtered), 0.5 * nrow(br_filtered))
+train_idx <- sample(1:nrow(br_filtered), 0.7 * nrow(br_filtered))
 train_raw <- br_filtered[train_idx, ]
-rest <- br_filtered[-train_idx, ]
-
-val_idx <- sample(1:nrow(rest), 0.7 * nrow(rest))
-validation <- rest[val_idx, ]
-test <- rest[-val_idx, ]
+test <- br_filtered[-train_idx, ]
 
 train_raw$finals <- factor(train_raw$finals, levels = c(0,1), labels = c("No", "Yes"))
-validation$finals <- factor(validation$finals, levels = c(0,1), labels = c("No", "Yes"))
-test$finals <- factor(test$finals,  levels = c(0,1), labels = c("No", "Yes"))
+test$finals <- factor(test$finals, levels = c(0,1), labels = c("No", "Yes"))
 
 train_raw$cluster <- NULL
-validation$cluster <- NULL
 test$cluster <- NULL
 
-set.seed(12345)
-train <- upSample(x = train_raw[, names(train_raw) != "finals"], 
-                  y = train_raw$finals, 
-                  yname = "finals")
+train <- train_raw
 
 table(train$finals)
 ```
 
-We also **up-sample** the Validation Set. We use **both upsampling and a cost matrix** because they address different aspects of class imbalance:
-
-- **Upsampling** helps the model **LEARN** better patterns from the minority class by providing more examples. Without sufficient examples, the model may struggle to learn meaningful patterns even if it knows to prioritize the minority class.
-
-- **Cost matrix** helps the model **MAKE DECISIONS** that prioritize the minority class by adjusting the decision boundary. It tells the model "predicting 'No' when it's actually 'Yes' is 200x worse than the reverse."
-
-Together, upsampling ensures the model has learned good patterns from both classes, while the cost matrix ensures it applies those patterns in a way that prioritizes finding Final Four teams (even at the cost of more false positives).
-
-```{r}
-set.seed(12345)
-validation_upsampled <- upSample(x = validation[, names(validation) != "finals"], 
-                                 y = validation$finals, 
-                                 yname = "finals")
-```
+We use a **cost matrix** to handle class imbalance by adjusting the decision boundary. The cost matrix tells the model "predicting 'No' when it's actually 'Yes' (False Negative) is 10x worse than the reverse (False Positive)." This ensures the model prioritizes finding Final Four teams even with the extreme class imbalance, without needing to upsample the training data.
 
 ## 6 Build Level 1 Models
 
-We’ll build five separate models on the training data: Logistic Regression, K-Nearest Neighbors, Support Vector Machine, Decision Tree, and Random Forest.
+We'll build three separate models on the training data: Logistic Regression, Decision Tree, and Random Forest. KNN and SVM are excluded as they don't handle class imbalance well.
 
 ### 6.1 Logistic Regression
 
@@ -192,28 +166,28 @@ log_model <- glm(finals ~ ., data = train, family = binomial)
 
 ### 6.2 K-Nearest Neighbors
 
-For KNN, we will use a tuned k value.
+KNN is commented out as it doesn't handle class imbalance well.
 
 ```{r}
-knn_pred_raw <- knn(
-  train = train[, -which(names(train) == "finals")],
-  test  = test[, -which(names(test) == "finals")],
-  cl    = train$finals,
-  k     = 15
-)
+# knn_pred_raw <- knn(
+#   train = train[, -which(names(train) == "finals")],
+#   test  = test[, -which(names(test) == "finals")],
+#   cl    = train$finals,
+#   k     = 15
+# )
 ```
 
 ### 6.3 Support Vector Machine (SVM)
 
-We will use a Radial Basis Function (RBF) kernel for the SVM.
+SVM with RBF kernel is commented out as it doesn't handle class imbalance well.
 
 ```{r}
-svm_model <- ksvm(
-  finals ~ .,
-  data = train,
-  kernel = "rbfdot",
-  prob.model = TRUE
-)
+# svm_model <- ksvm(
+#   finals ~ .,
+#   data = train,
+#   kernel = "rbfdot",
+#   prob.model = TRUE
+# )
 ```
 
 ### 6.4 Decision Tree (C5.0)
@@ -242,23 +216,23 @@ rf_model <- randomForest(
 
 ## 7 Level 1 Predictions and Evaluation
 
-We now generate predictions on the **Test Set** for evaluation, and on the **Validation Set** to prepare for Level 2 training.
+We now generate predictions on the **Test Set** for evaluation, and on the **Training Set** to prepare for Level 2 training.
 
 ```{r}
 log_probs <- predict(log_model, test, type = "response")
 log_pred <- ifelse(log_probs > 0.5, "Yes", "No")
 log_pred <- factor(log_pred, levels = c("No", "Yes"))
 
-knn_pred_raw <- knn(
-  train = train[, -which(names(train) == "finals")],
-  test  = test[, -which(names(test) == "finals")],
-  cl    = train$finals,
-  k     = 15
-)
+# knn_pred_raw <- knn(
+#   train = train[, -which(names(train) == "finals")],
+#   test  = test[, -which(names(test) == "finals")],
+#   cl    = train$finals,
+#   k     = 15
+# )
 
-svm_probs_matrix <- predict(svm_model, test, type = "probabilities")
-svm_probs <- svm_probs_matrix[, "Yes"] 
-svm_pred <- predict(svm_model, test)
+# svm_probs_matrix <- predict(svm_model, test, type = "probabilities")
+# svm_probs <- svm_probs_matrix[, "Yes"] 
+# svm_pred <- predict(svm_model, test)
 
 dt_pred <- predict(dt_model, test)
 dt_probs_matrix <- predict(dt_model, test, type = "prob")
@@ -271,11 +245,11 @@ rf_probs <- rf_probs_matrix[, "Yes"]
 cm_log <- confusionMatrix(log_pred, test$finals, positive = "Yes")
 cm_log$table
 
-cm_knn <- confusionMatrix(knn_pred_raw, test$finals, positive = "Yes")
-cm_knn$table
+# cm_knn <- confusionMatrix(knn_pred_raw, test$finals, positive = "Yes")
+# cm_knn$table
 
-cm_svm <- confusionMatrix(svm_pred, test$finals, positive = "Yes")
-cm_svm$table
+# cm_svm <- confusionMatrix(svm_pred, test$finals, positive = "Yes")
+# cm_svm$table
 
 cm_dt  <- confusionMatrix(dt_pred, test$finals, positive = "Yes")
 cm_dt$table
@@ -284,48 +258,44 @@ cm_rf  <- confusionMatrix(rf_pred, test$finals, positive = "Yes")
 cm_rf$table
 
 l1_results <- data.frame(
-  Model = c("Logistic Regression", "KNN", "SVM", "Decision Tree", "Random Forest"),
-  Kappa = c(cm_log$overall["Kappa"], cm_knn$overall["Kappa"], cm_svm$overall["Kappa"], 
-            cm_dt$overall["Kappa"], cm_rf$overall["Kappa"]),
-  Accuracy = c(cm_log$overall["Accuracy"], cm_knn$overall["Accuracy"], cm_svm$overall["Accuracy"], 
-               cm_dt$overall["Accuracy"], cm_rf$overall["Accuracy"]),
-  Sensitivity = c(cm_log$byClass["Sensitivity"], cm_knn$byClass["Sensitivity"], cm_svm$byClass["Sensitivity"], 
-                  cm_dt$byClass["Sensitivity"], cm_rf$byClass["Sensitivity"])
+  Model = c("Logistic Regression", "Decision Tree", "Random Forest"),
+  Kappa = c(cm_log$overall["Kappa"], cm_dt$overall["Kappa"], cm_rf$overall["Kappa"]),
+  Accuracy = c(cm_log$overall["Accuracy"], cm_dt$overall["Accuracy"], cm_rf$overall["Accuracy"]),
+  Sensitivity = c(cm_log$byClass["Sensitivity"], cm_dt$byClass["Sensitivity"], cm_rf$byClass["Sensitivity"])
 )
 
 kable(l1_results, digits = 3)
 
-log_probs_val <- predict(log_model, validation_upsampled, type = "response")
-knn_pred_val <- knn(
-  train = train[, -which(names(train) == "finals")],
-  test  = validation_upsampled[, -which(names(validation_upsampled) == "finals")],
-  cl    = train$finals,
-  k     = 15
-)
-svm_probs_val <- predict(svm_model, validation_upsampled, type = "probabilities")[, "Yes"]
-dt_probs_val <- predict(dt_model, validation_upsampled, type = "prob")[, "Yes"]
-rf_probs_val <- predict(rf_model, validation_upsampled, type = "prob")[, "Yes"]
+log_probs_train <- predict(log_model, train, type = "response")
+# knn_pred_train <- knn(
+#   train = train[, -which(names(train) == "finals")],
+#   test  = train[, -which(names(train) == "finals")],
+#   cl    = train$finals,
+#   k     = 15
+# )
+# svm_probs_train <- predict(svm_model, train, type = "probabilities")[, "Yes"]
+dt_probs_train <- predict(dt_model, train, type = "prob")[, "Yes"]
+rf_probs_train <- predict(rf_model, train, type = "prob")[, "Yes"]
 ```
 
 ## 8 Build Level 2 Model (Stacking)
 
-A single model, even a good one, has biases. We’ll create a stacked model by feeding the predictions from the L1 models into a new meta-model (the L2 model).
+A single model, even a good one, has biases. We'll create a stacked model by feeding the predictions from the L1 models into a new meta-model (the L2 model).
 
-We use the **Validation Set** predictions to train this meta-model, avoiding data leakage.
+We use the **Training Set** predictions to train this meta-model. Level 2 learns how to combine Level 1 predictions, and is evaluated on test set predictions to avoid data leakage.
 
 ```{r}
-knn_num_val <- ifelse(knn_pred_val == "Yes", 1, 0)
+# knn_num_train <- ifelse(knn_pred_train == "Yes", 1, 0)
 
 l2_train <- data.frame(
-  LR_Prob = log_probs_val,
-  KNN_Pred = knn_num_val, 
-  SVM_Prob = svm_probs_val,
-  DT_Prob = dt_probs_val,
-  RF_Prob = rf_probs_val,
-  finals = validation_upsampled$finals
+  LR_Prob = log_probs_train,
+  DT_Prob = dt_probs_train,
+  RF_Prob = rf_probs_train,
+  finals = train$finals
 )
+# print(l2_train)
 
-cost_matrix <- matrix(c(0, 5, 1, 0), nrow = 2, byrow = TRUE)
+cost_matrix <- matrix(c(0, 700, 1, 0), nrow = 2, byrow = TRUE)
 colnames(cost_matrix) <- c("No", "Yes")
 rownames(cost_matrix) <- c("No", "Yes")
 
@@ -341,12 +311,10 @@ l2_model <- C5.0(
 Finally, we predict the Level 2 model on the **Test Set** (which it has never seen) and check performance. This allows for a fair apple-to-apple comparison with the Level 1 models evaluated in Section 7.
 
 ```{r}
-knn_num_test <- ifelse(knn_pred_raw == "Yes", 1, 0)
+# knn_num_test <- ifelse(knn_pred_raw == "Yes", 1, 0)
 
 l2_test_input <- data.frame(
   LR_Prob = log_probs,
-  KNN_Pred = knn_num_test,
-  SVM_Prob = svm_probs,
   DT_Prob = dt_probs,
   RF_Prob = rf_probs,
   finals = test$finals
