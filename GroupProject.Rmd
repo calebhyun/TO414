@@ -1,5 +1,5 @@
 ---
-title: "HW#5: Predicting Tournament Success with Stacked Ensemble"
+title: "Predicting Tournament Success with Stacked Ensemble"
 author: "Caleb Hyun"
 date: "November 6, 2025"
 output:
@@ -46,6 +46,10 @@ br <- br %>%
  
 br$finals <- ifelse(br$finals == "No", 0, 1)
 
+# Preserve original data with Season and team names for later matching
+# We'll filter this the same way as br to keep rows aligned
+br_original <- br[, c("Season", "Full.Team.Name")]
+
 summary <- factor(br$finals, levels = c(0, 1), labels = c("No", "Yes"))
 y_summary <- br |>
   group_by(finals) |>
@@ -65,12 +69,16 @@ br <- br[, !sapply(br, is.factor) | (names(br) %in% c("finals", "Active.Coaching
 br <- subset(br, Season > 2010) 
 br <- subset(br, Season != 2020)
 
+# Filter metadata the same way
+br_original <- br_original[br_original$Season > 2010 & br_original$Season != 2020, ]
+
 br$Post.Season.Tournament.Sorting.Index <- NULL
 
 br$Since <- NULL
 br$Active.Coaching.Length <- NULL
 
 br <- br[, colSums(is.na(br)) == 0]
+# Note: colSums removes columns, not rows, so br_original stays aligned
 
 cols <- grepl("Raw", names(br))
 br <- br[, !cols]
@@ -146,6 +154,16 @@ train_raw$cluster <- NULL
 test$cluster <- NULL
 
 train <- train_raw
+
+# Get row indices in original data for test set
+# First, find which rows in br_minmax correspond to br_filtered
+filtered_indices <- which(br_minmax$cluster %in% c(1, 3))
+# Then get test set indices
+test_indices_in_filtered <- setdiff(1:nrow(br_filtered), train_idx)
+test_indices_in_original <- filtered_indices[test_indices_in_filtered]
+
+# Get metadata for test set from original data
+test_metadata <- br_original[test_indices_in_original, ]
 
 table(train$finals)
 ```
@@ -324,6 +342,45 @@ l2_pred <- predict(l2_model, l2_test_input)
 l2_cm <- confusionMatrix(l2_pred, test$finals, positive = "Yes")
 
 l2_cm$table
+```
+
+## 9.1 Final Four Prediction Analysis
+
+Now we analyze which Final Four teams were correctly predicted, incorrectly predicted, and missed. We add back the team names and seasons AFTER predictions are made to avoid any changes to the test data:
+
+```{r}
+# Create results dataframe with predictions and actual values
+results_df <- data.frame(
+  Season = test_metadata$Season,
+  Team = test_metadata$Full.Team.Name,
+  Predicted = l2_pred,
+  Actual = test$finals
+)
+
+# Correctly predicted (True Positives)
+correctly_predicted <- results_df[results_df$Predicted == "Yes" & results_df$Actual == "Yes", ]
+cat("=== CORRECTLY PREDICTED FINAL FOUR TEAMS ===\n")
+if(nrow(correctly_predicted) > 0) {
+  print(correctly_predicted[, c("Season", "Team")])
+} else {
+  cat("None\n")
+}
+
+cat("\n=== INCORRECTLY PREDICTED FINAL FOUR TEAMS (False Positives) ===\n")
+incorrectly_predicted <- results_df[results_df$Predicted == "Yes" & results_df$Actual == "No", ]
+if(nrow(incorrectly_predicted) > 0) {
+  print(incorrectly_predicted[, c("Season", "Team")])
+} else {
+  cat("None\n")
+}
+
+cat("\n=== MISSED FINAL FOUR TEAMS (False Negatives) ===\n")
+missed <- results_df[results_df$Predicted == "No" & results_df$Actual == "Yes", ]
+if(nrow(missed) > 0) {
+  print(missed[, c("Season", "Team")])
+} else {
+  cat("None\n")
+}
 ```
 
 ## 10 Comparison and Summary
