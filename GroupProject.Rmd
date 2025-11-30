@@ -24,7 +24,7 @@ library(knitr)
 library(randomForest)
 library(e1071)
 library(pROC)
-library(cluster) # for PAM
+library(cluster)
 
 set.seed(12345)
 ```
@@ -41,13 +41,11 @@ br <- read.csv("march.csv")
 # Turn All String into Factor
 br[sapply(br, is.character)] <- lapply(br[sapply(br, is.character)], as.factor)
 
-# Rename Final.Four. into usable string "finals"
 br <- br %>%
   rename(finals = Final.Four.)
  
 br$finals <- ifelse(br$finals == "No", 0, 1)
 
-# Make Summary Table to display No vs Yes quantities
 summary <- factor(br$finals, levels = c(0, 1), labels = c("No", "Yes"))
 y_summary <- br |>
   group_by(finals) |>
@@ -62,28 +60,21 @@ kable(y_summary, col.names = c("Finals", "Count", "Percent"))
 Next, we clean the data. We remove variations of redundant data columns such as Short Conference Name and Mapped Conference Name and Mapped ESPN Team Name, as well as specific seasons that were problematic.
 
 ```{r}
-# 1. Remove Unnecessary Factors
 br <- br[, !sapply(br, is.factor) | (names(br) %in% c("finals", "Active.Coaching.Length"))]
 
-# 2. Remove rows before 2010 and drop 2020
 br <- subset(br, Season > 2010) 
 br <- subset(br, Season != 2020)
 
-# 3. Remove columns with zero variance (all 1s)
 br$Post.Season.Tournament.Sorting.Index <- NULL
 
-# Remove redundant cols
 br$Since <- NULL
 br$Active.Coaching.Length <- NULL
 
-# Got rid of columns that have even 1 data row of n/a
 br <- br[, colSums(is.na(br)) == 0]
 
-# Got rid of columns that have “Raw” in them
 cols <- grepl("Raw", names(br))
 br <- br[, !cols]
 
-# Got rid of columns that have “Rank” in them
 cols <- grepl("Rank", names(br))
 br <- br[, !cols]
 ```
@@ -107,20 +98,15 @@ We use K-means clustering to segment the teams into 4 distinct groups, hoping to
 ```{r}
 set.seed(12345)
 
-# Temporarily remove target for clustering
 br_cluster_data <- br_minmax[, names(br_minmax) != "finals"]
 
-# K-means with k=4
 k4 <- kmeans(br_cluster_data, centers = 4)
 
-# Add cluster assignment back to data
 br_minmax$cluster <- k4$cluster
 
-# Filter to keep only Clusters 1 and 3
 br_filtered <- subset(br_minmax, cluster %in% c(1, 3))
-br_filtered$cluster <- factor(br_filtered$cluster) # Refactor
+br_filtered$cluster <- factor(br_filtered$cluster)
 
-# Show counts for the kept clusters
 table(br_filtered$cluster)
 ```
 
@@ -153,22 +139,18 @@ Given the extreme class imbalance (~99% "No", ~1% "Yes"), we will **up-sample** 
 ```{r}
 set.seed(12345)
 
-# 1. Split into Train (50%) and Rest (50%)
 train_idx <- sample(1:nrow(br_filtered), 0.5 * nrow(br_filtered))
 train_raw <- br_filtered[train_idx, ]
 rest <- br_filtered[-train_idx, ]
 
-# 2. Split Rest into Validation (70% of rest -> 35% total) and Test (30% of rest -> 15% total)
 val_idx <- sample(1:nrow(rest), 0.7 * nrow(rest))
 validation <- rest[val_idx, ]
 test <- rest[-val_idx, ]
 
-# Handle Class Imbalance: Up-Sampling on Train Only
 train_raw$finals <- factor(train_raw$finals, levels = c(0,1), labels = c("No", "Yes"))
 validation$finals <- factor(validation$finals, levels = c(0,1), labels = c("No", "Yes"))
 test$finals <- factor(test$finals,  levels = c(0,1), labels = c("No", "Yes"))
 
-# Drop cluster column from predictors (it was used for filtering)
 train_raw$cluster <- NULL
 validation$cluster <- NULL
 test$cluster <- NULL
@@ -178,7 +160,6 @@ train <- upSample(x = train_raw[, names(train_raw) != "finals"],
                   y = train_raw$finals, 
                   yname = "finals")
 
-# Check the new balance
 table(train$finals)
 ```
 
@@ -214,7 +195,6 @@ log_model <- glm(finals ~ ., data = train, family = binomial)
 For KNN, we will use a tuned k value.
 
 ```{r}
-# Training KNN
 knn_pred_raw <- knn(
   train = train[, -which(names(train) == "finals")],
   test  = test[, -which(names(test) == "finals")],
@@ -265,13 +245,10 @@ rf_model <- randomForest(
 We now generate predictions on the **Test Set** for evaluation, and on the **Validation Set** to prepare for Level 2 training.
 
 ```{r}
-# --- Predictions on Test Set (For Evaluation) ---
-# 1. Logistic Regression
 log_probs <- predict(log_model, test, type = "response")
 log_pred <- ifelse(log_probs > 0.5, "Yes", "No")
 log_pred <- factor(log_pred, levels = c("No", "Yes"))
 
-# 2. KNN
 knn_pred_raw <- knn(
   train = train[, -which(names(train) == "finals")],
   test  = test[, -which(names(test) == "finals")],
@@ -279,43 +256,33 @@ knn_pred_raw <- knn(
   k     = 15
 )
 
-# 3. SVM
 svm_probs_matrix <- predict(svm_model, test, type = "probabilities")
 svm_probs <- svm_probs_matrix[, "Yes"] 
 svm_pred <- predict(svm_model, test)
 
-# 4. Decision Tree
 dt_pred <- predict(dt_model, test)
 dt_probs_matrix <- predict(dt_model, test, type = "prob")
 dt_probs <- dt_probs_matrix[, "Yes"]
 
-# 5. Random Forest
 rf_pred <- predict(rf_model, test)
 rf_probs_matrix <- predict(rf_model, test, type = "prob")
 rf_probs <- rf_probs_matrix[, "Yes"]
 
-# --- Evaluation on Test Set ---
 cm_log <- confusionMatrix(log_pred, test$finals, positive = "Yes")
-print("Logistic Regression CM:")
-print(cm_log$table)
+cm_log$table
 
 cm_knn <- confusionMatrix(knn_pred_raw, test$finals, positive = "Yes")
-print("KNN CM:")
-print(cm_knn$table)
+cm_knn$table
 
 cm_svm <- confusionMatrix(svm_pred, test$finals, positive = "Yes")
-print("SVM CM:")
-print(cm_svm$table)
+cm_svm$table
 
 cm_dt  <- confusionMatrix(dt_pred, test$finals, positive = "Yes")
-print("Decision Tree CM:")
-print(cm_dt$table)
+cm_dt$table
 
 cm_rf  <- confusionMatrix(rf_pred, test$finals, positive = "Yes")
-print("Random Forest CM:")
-print(cm_rf$table)
+cm_rf$table
 
-# Collect Results
 l1_results <- data.frame(
   Model = c("Logistic Regression", "KNN", "SVM", "Decision Tree", "Random Forest"),
   Kappa = c(cm_log$overall["Kappa"], cm_knn$overall["Kappa"], cm_svm$overall["Kappa"], 
@@ -328,8 +295,6 @@ l1_results <- data.frame(
 
 kable(l1_results, digits = 3)
 
-# --- Predictions on Validation Set (For L2 Training) ---
-# We predict on the UPSAMPLED validation set now
 log_probs_val <- predict(log_model, validation_upsampled, type = "response")
 knn_pred_val <- knn(
   train = train[, -which(names(train) == "finals")],
@@ -349,8 +314,6 @@ A single model, even a good one, has biases. We’ll create a stacked model by f
 We use the **Validation Set** predictions to train this meta-model, avoiding data leakage.
 
 ```{r}
-# Prepare Level 2 Training Data (from Validation Set)
-# Note: KNN from 'class' package only returns class labels, so we use 0/1 approximation if probs unavailable
 knn_num_val <- ifelse(knn_pred_val == "Yes", 1, 0)
 
 l2_train <- data.frame(
@@ -362,17 +325,9 @@ l2_train <- data.frame(
   finals = validation_upsampled$finals
 )
 
-# Build L2 Model (C5.0 with Cost Matrix)
-# Penalize False Negatives (Missing a Final Four team) more than False Positives
-# IMPORTANT: In C5.0, rows = PREDICTED classes, columns = ACTUAL classes
-# Matrix format: [Predicted No, Actual No] [Predicted No, Actual Yes]
-#                [Predicted Yes, Actual No] [Predicted Yes, Actual Yes]
-# We want to penalize: Predicted No when Actual Yes (False Negative)
 cost_matrix <- matrix(c(0, 5, 1, 0), nrow = 2, byrow = TRUE)
-colnames(cost_matrix) <- c("No", "Yes")  # Actual classes
-rownames(cost_matrix) <- c("No", "Yes")  # Predicted classes
-# This means: False Negative (Predicted No, Actual Yes) costs 200
-#             False Positive (Predicted Yes, Actual No) costs 1
+colnames(cost_matrix) <- c("No", "Yes")
+rownames(cost_matrix) <- c("No", "Yes")
 
 l2_model <- C5.0(
   x = l2_train[, -which(names(l2_train) == "finals")],
@@ -386,7 +341,6 @@ l2_model <- C5.0(
 Finally, we predict the Level 2 model on the **Test Set** (which it has never seen) and check performance. This allows for a fair apple-to-apple comparison with the Level 1 models evaluated in Section 7.
 
 ```{r}
-# Prepare Test Data for L2 (from Test Set predictions generated in Section 7)
 knn_num_test <- ifelse(knn_pred_raw == "Yes", 1, 0)
 
 l2_test_input <- data.frame(
@@ -401,8 +355,7 @@ l2_test_input <- data.frame(
 l2_pred <- predict(l2_model, l2_test_input)
 l2_cm <- confusionMatrix(l2_pred, test$finals, positive = "Yes")
 
-print("Stacked Model CM:")
-print(l2_cm$table)
+l2_cm$table
 ```
 
 ## 10 Comparison and Summary
@@ -442,13 +395,3 @@ ggplot(final_comparison, aes(x = reorder(Model, Sensitivity), y = Sensitivity, f
   theme_minimal() +
   theme(legend.position = "none")
 ```
-
-## 11 Summary and Discussion
-
-## 12 Financial and Business Impact Analysis
-
-## 13 Part 2: Implementing the Prediction Model
-
-### 13.1 Reverse Bias (Over-Ranking)
-
-### 13.2 Team Selection for Sponsorship
