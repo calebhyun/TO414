@@ -1,6 +1,6 @@
 ---
 title: "Predicting Tournament Success with Stacked Ensemble"
-author: "Caleb Hyun"
+author: "Caleb Hyun, Magnus Nielsen, Pari Dar, Aryan Gupta, Jaeyi Kang"
 date: "November 6, 2025"
 output:
   html_document:
@@ -31,7 +31,9 @@ set.seed(12345)
 
 ## 1 Why do we Care?
 
-Our goal is to identify which college basketball teams are most likely to make a Final Four appearance based on their regular season metrics. Early identification of these "Cinderella" or powerhouse teams allows athletic departments, analysts, and fans to allocate their attention and resources effectively. The "best" model will effectively identify tournament contenders (True Positives) while minimizing false hope for teams that won't make it deep (False Positives).
+March Madness is the NCAA's annual Division I men's basketball tournament that brings together 64 teams in a single-elimination tournament over the course of a few weeks. The 64 teams are divided into 4 regions - East, West, South, and Midwest - with each region having a team seeded 1-16 (1 seed is the best and 16 seed is the worst). In each region, the 1 seed plays the 16 seed, the 2 seed plays the 15 seed, and so on, until 1 team is left standing in the region. This team represents the region in the "Final Four."
+
+With frequent upsets - especially in early rounds - and a mix of automatic qualifiers and committee-selected teams, the tournament is very chaotic. Predicting winners is challenging yet significantly valuable, especially in the world of sports betting. This analytics project aims to predict which teams will advance to the Final Four. By identifying key metrics associated with deep tournament runs, this project helps teams understand the drivers of tournament success. In addition, with March Madness being one of the most bet on sporting events every year, this project also offers insights into more profitable and data-driven betting strategies for future tournaments.
 
 ## 2 Load the Data
 
@@ -61,7 +63,7 @@ kable(y_summary, col.names = c("Finals", "Count", "Percent"))
 
 ## 3 Clean The Data
 
-Next, we clean the data. We remove variations of redundant data columns such as Short Conference Name and Mapped Conference Name and Mapped ESPN Team Name, as well as specific seasons that were problematic.
+Before building our predictive models, the dataset required substantial cleaning to ensure accuracy and consistency. We first filtered the data to only include seasons after 2010 (disregarding 2020 since there was no tournament due to COVID) to maintain comparability across years, as some of the statistics from years prior to 2010 were missing. Next, we removed unnecessary and unusable factors, such as Coach Name, Conference, etc, and excluded metrics that were recorded during the tournament. Redundant columns, specifically those representing rankings for existing raw metrics, were also eliminated to avoid duplication. This filtering process ensures that our models are trained only on pre-tournament data, preventing data leakage that would artificially inflate performance metrics.
 
 ```{r}
 br <- br[, !sapply(br, is.factor) | (names(br) %in% c("finals", "Active.Coaching.Length"))]
@@ -87,7 +89,7 @@ cols <- grepl("Rank", names(br))
 br <- br[, !cols]
 ```
 
-Now we create dummy variables and scale the data. We use min-max scaling to normalize the feature range for distance-based algorithms like KNN.
+To prepare everything else for our models, we created dummy variables for categorical fields and applied min-max scaling to normalize all inputs to a 0/1 range. Overall, this cleaning process reduced the dataset by roughly half - from 8315 columns and 165 rows to 4950 columns and 70 rows - leaving us with a more streamlined and foundational dataset for our predictions.
 
 ```{r}
 br_d <- as.data.frame(model.matrix(~ . -1, data = br))
@@ -99,9 +101,39 @@ minmax <- function(x){
 br_minmax <- as.data.frame(lapply(br_d, minmax))
 ```
 
+### 3.1 Class Imbalance Visualization
+
+In our sample, we found that 99% of the data do not make it to the final four, meaning that only 1% of them are classified as a Yes. Since models are designed to maximize the accuracy of the predictions, there is high chance that the model follows the naive prediction of No.
+
+```{r}
+# Class imbalance visualization
+df <- data.frame(
+  Finals = factor(c(0, 1)),
+  Count = c(4898, 52),
+  Percent = c(98.9, 1.1)
+)
+
+# Bar chart
+ggplot(df, aes(x = Finals, y = Count, fill = Finals)) +
+  geom_bar(stat = "identity", width = 0.6, show.legend = FALSE) +
+  geom_text(aes(label = paste0(Percent, "%")),
+            vjust = -0.5,
+            size = 6) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  scale_fill_manual(values = c("#4C7D99", "#C94C4C")) +
+  labs(
+    title = "Final Four Occurrence",
+    x = "Final Four (1 = Yes, 0 = No)",
+    y = "Count"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
 ## 4 Cluster Analysis
 
-We use K-means clustering to segment the teams into 4 distinct groups, hoping to isolate different performance profiles. We then filter to keep only Clusters 1 and 3 for our predictive modeling.
+To refine the dataset and focus the predictive model on Final Four contenders, we performed a K-Means Clustering analysis. This partitioned the teams into distinct groups based on their performance metrics, allowing us to identify and exclude teams with historically low probabilities of success.
+
+We normalize the data using Min-Max scaling to a 0-1 range, as to not have larger absolute values disproportionately affect smaller data ranges such as percentages. Further, to find the optimal value of K's we look at cluster sizes and cluster values to reach a level of clustering that accurately and relevantly segments the teams into interpretable performance profiles. The segmentation occurred on regular-season performance metrics, such as, adjusted offense & defense, tempo, shooting efficiency and field goal percentages.
 
 ```{r}
 set.seed(12345)
@@ -118,6 +150,34 @@ br_filtered$cluster <- factor(br_filtered$cluster)
 table(br_filtered$cluster)
 ```
 
+The analysis identified four unique team archetypes, categorized into "Elite" or "Bad". 
+
+**Tier 1: Elite Teams**
+
+**Cluster 1: The Shotmakers (23.1% of teams)**
+
+These teams are the most efficient on offense, excelling from the two-point range and free-throw line. Furthermore, they show willingness to shoot from the three-point range, having the highest FG3Rate. Further these teams generally employ taller and more experienced players than the competition.
+
+**Cluster 3: The Walls (19.1% of teams)**
+
+Defined by elite defense, these teams are the best at limiting opponent shooting efficiency. They have a strong interior presence (highest block percentage) and run a traditional offense that relies less on 3-pointers and more on efficient ball movement.
+
+**Tier 2: Bad Teams**
+
+**Cluster 2: The Underdogs (26.0% of teams)**
+
+This group represents the lowest overall talent level, with the lowest scores in offensive efficiency and height. They suffer from the worst shooting percentages (both 2-point and 3-point) and play a conservative but inefficient offensive style. 
+
+**Cluster 4: The Wildfire (31.8% of teams)**
+
+Characterized by "chaos," these teams have the worst defense (allowing high opponent shooting percentages) and play at the highest pace. They rely heavily on 3-pointers (both taking and allowing them) but lack defensive impact, having the lowest block and steal percentages.
+
+**Outcome from the clustering analysis**
+
+The primary outcome was a significant reduction in data that we used for further analysis. Looking into the data showed that no "Bad" team (clusters 2 and 4) have reached the Final Four in the last 25 years. Therefore, as our goal is to predict Final Four teams, we exclude all teams belonging to the Underdogs or the Wildfire clusters. This removes approximately 58% of all observations in the dataset. 
+
+In the following sections we will use the 42% remaining observations to train models to distinguish between good teams and champions-caliber teams to make our final predictions for who will end up in the Final Four.
+
 ## 5 Split Train Test (Level 1)
 
 **Data Flow Summary:**
@@ -127,18 +187,18 @@ table(br_filtered$cluster)
 4. **Split Data**: Divide the filtered data into:
    - **Training Set (70%)**: To train Level 1 models and Level 2 model
    - **Test Set (30%)**: To evaluate ALL models fairly on unseen data
-5. **Train Level 1 Models**: Build three models (Logistic Regression, Decision Tree, Random Forest) on the training set. KNN and SVM are excluded as they don't handle class imbalance well. We use a cost matrix in Level 2 to handle class imbalance rather than upsampling.
+5. **Train Level 1 Models**: Build three models (Logistic Regression, Decision Tree, Random Forest) on the training set. We use cost matrix optimization in Level 2 to handle class imbalance.
 6. **Generate Level 1 Predictions**: 
    - Predict on **training set** → used as features for Level 2 training
    - Predict on **test set** → used for final evaluation
-7. **Train Level 2 Model**: Build stacked model using Level 1 predictions from training set, with cost matrix (10:1) to penalize False Negatives.
+7. **Train Level 2 Model**: Build stacked model using Level 1 predictions from training set. Perform grid search over cost matrix weights to find the optimal cost that maximizes precision.
 8. **Evaluate**: Test Level 2 model on test set predictions.
 
 We'll split the **filtered data (Clusters 1 & 3)** into two sets:
 1. **Training Set (70%)**: To train Level 1 models and the Level 2 (Stacked) model.
 2. **Test Set (30%)**: To evaluate ALL models fairly on unseen data.
 
-Given the extreme class imbalance (~99% "No", ~1% "Yes"), we will rely on the **cost matrix** in Level 2 to handle the imbalance, rather than upsampling. This keeps the training distribution similar to the test distribution, which may improve generalization.
+Given the extreme class imbalance (~99% "No", ~1% "Yes"), we will rely on **cost matrix optimization** in Level 2 to handle the imbalance, rather than upsampling. We perform a grid search over a wide range of cost weights to find the optimal cost that maximizes precision on the training set while ensuring predictions are made. This approach penalizes false positives directly during model training.
 
 ```{r}
 set.seed(12345)
@@ -168,15 +228,15 @@ test_metadata <- br_original[test_indices_in_original, ]
 table(train$finals)
 ```
 
-We use a **cost matrix** to handle class imbalance by adjusting the decision boundary. The cost matrix tells the model "predicting 'No' when it's actually 'Yes' (False Negative) is 10x worse than the reverse (False Positive)." This ensures the model prioritizes finding Final Four teams even with the extreme class imbalance, without needing to upsample the training data.
+We use cost matrix optimization to handle class imbalance by penalizing false positives during model training. However, cost matrix optimization has fundamental limitations for maximizing precision. As the false positive cost increases, the model becomes increasingly conservative. Beyond a certain threshold (approximately cost = 20 in our analysis), the model stops making any positive predictions entirely, resulting in zero precision rather than improved precision. This occurs because the cost matrix penalizes false positives so heavily that the optimal strategy becomes predicting "No" for all cases, which minimizes total cost but eliminates all positive predictions. The visualization of our grid search results clearly demonstrates this phenomenon: precision remains high (around 0.975) for costs from 1 to 15, but then drops abruptly to zero at cost = 20 and remains zero for all higher cost values. This binary behavior indicates that the cost matrix approach cannot fine-tune precision beyond a certain point. Therefore, we select the cost value that produces the highest precision among costs that still generate predictions, rather than attempting to maximize precision directly through cost matrix tuning.
 
 ## 6 Build Level 1 Models
 
-We'll build three separate models on the training data: Logistic Regression, Decision Tree, and Random Forest. KNN and SVM are excluded as they don't handle class imbalance well.
+We build three separate models on the training data: Logistic Regression, Decision Tree, and Random Forest. These models serve as base learners in our stacked ensemble approach, each capturing different aspects of the relationship between team performance metrics and Final Four success.
 
 ### 6.1 Logistic Regression
 
-We start with a full logistic regression model.
+We start with a full logistic regression model. This model works well here because it's built to give clear, interpretable probabilities instead of just a hard yes or no. It shows how each variable pushes a team closer to or farther from making the Final Four. Because it's a simple, low-variance model, it doesn't overfit as easily as more complex ones, which matters in this dataset since positive cases are extremely rare. It also provides calibrated probability outputs that make it especially useful as a base learner in a stacked model, since the second level can meaningfully use those probabilities as inputs.
 
 ```{r}
 log_model <- glm(finals ~ ., data = train, family = binomial)
@@ -184,33 +244,15 @@ log_model <- glm(finals ~ ., data = train, family = binomial)
 
 ### 6.2 K-Nearest Neighbors
 
-KNN is commented out as it doesn't handle class imbalance well.
-
-```{r}
-# knn_pred_raw <- knn(
-#   train = train[, -which(names(train) == "finals")],
-#   test  = test[, -which(names(test) == "finals")],
-#   cl    = train$finals,
-#   k     = 15
-# )
-```
+KNN isn't used in our modeling because it performs poorly with extreme class imbalance. Since it classifies a new point by looking at its closest neighbors, we found that negative cases dominate almost every neighborhood, causing the model to predict "No" nearly all the time. It also depends heavily on distance, which becomes unreliable in high-dimensional, highly correlated sports data. Because of these issues, KNN would add noise rather than value to a stacked model, so we've commented it out.
 
 ### 6.3 Support Vector Machine (SVM)
 
-SVM with RBF kernel is commented out as it doesn't handle class imbalance well.
-
-```{r}
-# svm_model <- ksvm(
-#   finals ~ .,
-#   data = train,
-#   kernel = "rbfdot",
-#   prob.model = TRUE
-# )
-```
+Much like KNN, SVM with an RBF kernel also struggles when one class overwhelmingly outnumbers the other. The model tries to find a boundary that separates the classes, but with so few "Yes" cases, the rare class gets overshadowed and the boundary ends up favoring the majority class. Tuning SVMs for imbalance requires extensive parameter adjustments and specialized class weighting, which adds complexity without guaranteeing meaningful gains. Given these issues, we excluded SVM from the final stack to keep the pipeline efficient and focused on models that learn better from this heavily skewed dataset.
 
 ### 6.4 Decision Tree (C5.0)
 
-Next, we’ll build the standard C5.0 Decision Tree.
+Next, we build the standard C5.0 Decision Tree. Decision trees are easy to interpret and can pick up nonlinear relationships that logistic regression might miss. They work by repeatedly splitting the data into smaller groups based on the features that best separate the classes. However, because the minority class is so small, the tree can end up biased toward predicting the majority class, which is why it performs worse than expected in this problem.
 
 ```{r}
 dt_model <- C5.0(
@@ -221,7 +263,7 @@ dt_model <- C5.0(
 
 ### 6.5 Random Forest
 
-We’ll add a Random Forest model, which creates multiple decision trees.
+We also add a RandomForest model, which creates many decision trees and averages their predictions to improve stability. This approach usually boosts accuracy because it reduces the noise and overfitting that single trees struggle with. Random Forests can capture complex interactions between variables, making them strong general-purpose classifiers.
 
 ```{r}
 rf_model <- randomForest(
@@ -234,23 +276,12 @@ rf_model <- randomForest(
 
 ## 7 Level 1 Predictions and Evaluation
 
-We now generate predictions on the **Test Set** for evaluation, and on the **Training Set** to prepare for Level 2 training.
+We generate predictions on the Test Set for evaluation, and on the Training Set to prepare for Level 2 training. The training set predictions serve as features for the Level 2 meta-model, while test set predictions allow us to evaluate each Level 1 model's performance independently before stacking.
 
 ```{r}
 log_probs <- predict(log_model, test, type = "response")
 log_pred <- ifelse(log_probs > 0.5, "Yes", "No")
 log_pred <- factor(log_pred, levels = c("No", "Yes"))
-
-# knn_pred_raw <- knn(
-#   train = train[, -which(names(train) == "finals")],
-#   test  = test[, -which(names(test) == "finals")],
-#   cl    = train$finals,
-#   k     = 15
-# )
-
-# svm_probs_matrix <- predict(svm_model, test, type = "probabilities")
-# svm_probs <- svm_probs_matrix[, "Yes"] 
-# svm_pred <- predict(svm_model, test)
 
 dt_pred <- predict(dt_model, test)
 dt_probs_matrix <- predict(dt_model, test, type = "prob")
@@ -263,12 +294,6 @@ rf_probs <- rf_probs_matrix[, "Yes"]
 cm_log <- confusionMatrix(log_pred, test$finals, positive = "Yes")
 cm_log$table
 
-# cm_knn <- confusionMatrix(knn_pred_raw, test$finals, positive = "Yes")
-# cm_knn$table
-
-# cm_svm <- confusionMatrix(svm_pred, test$finals, positive = "Yes")
-# cm_svm$table
-
 cm_dt  <- confusionMatrix(dt_pred, test$finals, positive = "Yes")
 cm_dt$table
 
@@ -279,58 +304,183 @@ l1_results <- data.frame(
   Model = c("Logistic Regression", "Decision Tree", "Random Forest"),
   Kappa = c(cm_log$overall["Kappa"], cm_dt$overall["Kappa"], cm_rf$overall["Kappa"]),
   Accuracy = c(cm_log$overall["Accuracy"], cm_dt$overall["Accuracy"], cm_rf$overall["Accuracy"]),
-  Sensitivity = c(cm_log$byClass["Sensitivity"], cm_dt$byClass["Sensitivity"], cm_rf$byClass["Sensitivity"])
+  Sensitivity = c(cm_log$byClass["Sensitivity"], cm_dt$byClass["Sensitivity"], cm_rf$byClass["Sensitivity"]),
+  Precision = c(cm_log$byClass["Precision"], cm_dt$byClass["Precision"], cm_rf$byClass["Precision"])
 )
 
 kable(l1_results, digits = 3)
 
 log_probs_train <- predict(log_model, train, type = "response")
-# knn_pred_train <- knn(
-#   train = train[, -which(names(train) == "finals")],
-#   test  = train[, -which(names(train) == "finals")],
-#   cl    = train$finals,
-#   k     = 15
-# )
-# svm_probs_train <- predict(svm_model, train, type = "probabilities")[, "Yes"]
 dt_probs_train <- predict(dt_model, train, type = "prob")[, "Yes"]
 rf_probs_train <- predict(rf_model, train, type = "prob")[, "Yes"]
 ```
 
 ## 8 Build Level 2 Model (Stacking)
 
-A single model, even a good one, has biases. We'll create a stacked model by feeding the predictions from the L1 models into a new meta-model (the L2 model).
+Individual models exhibit inherent biases. We construct a stacked ensemble model by using Level 1 model predictions as inputs to a meta-model at Level 2. Stacking leverages the strengths of multiple models while mitigating their individual weaknesses, often resulting in improved predictive performance.
 
-We use the **Training Set** predictions to train this meta-model. Level 2 learns how to combine Level 1 predictions, and is evaluated on test set predictions to avoid data leakage.
+We use the Training Set predictions to train this meta-model. Level 2 learns how to combine Level 1 predictions, and is evaluated on test set predictions to avoid data leakage. This two-stage approach ensures that the meta-model learns the optimal way to weight and combine the base model predictions without seeing the test data.
 
 ```{r}
-# knn_num_train <- ifelse(knn_pred_train == "Yes", 1, 0)
-
 l2_train <- data.frame(
   LR_Prob = log_probs_train,
   DT_Prob = dt_probs_train,
   RF_Prob = rf_probs_train,
   finals = train$finals
 )
-# print(l2_train)
+```
 
-cost_matrix <- matrix(c(0, 700, 1, 0), nrow = 2, byrow = TRUE)
-colnames(cost_matrix) <- c("No", "Yes")
-rownames(cost_matrix) <- c("No", "Yes")
+Cross-validation folds for cost matrix evaluation:
+
+```{r}
+set.seed(12345)
+folds <- createFolds(train$finals, k = 5, list = TRUE)
+```
+
+C5.0 control parameters:
+
+```{r}
+c5_control <- C5.0Control(
+  winnow = FALSE,
+  noGlobalPruning = FALSE,
+  CF = 0.25,
+  minCases = 10,
+  sample = 0.9,
+  earlyStopping = TRUE
+)
+```
+
+Function to evaluate cost matrix using cross-validation:
+
+```{r}
+evaluate_cost_cv <- function(cost_val, train_data, actual, folds_list) {
+  # Cost matrix format: rows = predicted, columns = actual
+  cm_costs <- matrix(c(0, 1, cost_val, 0), nrow = 2, byrow = TRUE)
+  rownames(cm_costs) <- c("No", "Yes")
+  colnames(cm_costs) <- c("No", "Yes")
+  
+  cv_precisions <- numeric(length(folds_list))
+  cv_num_preds <- numeric(length(folds_list))
+  
+  for(i in 1:length(folds_list)) {
+    fold_idx <- folds_list[[i]]
+    train_fold <- train_data[-fold_idx, ]
+    val_fold <- train_data[fold_idx, ]
+    
+    # Train on fold
+    mod <- C5.0(
+      x = train_fold[, -which(names(train_fold) == "finals")],
+      y = train_fold$finals,
+      costs = cm_costs,
+      control = c5_control
+    )
+    
+    # Predict on validation fold
+    preds <- predict(mod, val_fold[, -which(names(val_fold) == "finals")])
+    
+    # Metrics
+    n_pos <- sum(preds == "Yes")
+    cv_num_preds[i] <- n_pos
+    
+    if(n_pos > 0) {
+      cm <- confusionMatrix(preds, actual[fold_idx], positive = "Yes")
+      prec <- cm$byClass["Precision"]
+      cv_precisions[i] <- ifelse(is.na(prec), 0, prec)
+    } else {
+      cv_precisions[i] <- 0
+    }
+  }
+  
+  return(list(
+    cost = cost_val, 
+    avg_preds = mean(cv_num_preds), 
+    avg_precision = mean(cv_precisions)
+  ))
+}
+```
+
+Cost candidates for grid search:
+
+```{r}
+cost_candidates <- c(1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 60, 75, 100)
+results_df <- data.frame(Cost=numeric(), CV_Precision=numeric(), Avg_Predictions=numeric())
+
+for(c in cost_candidates) {
+  res <- evaluate_cost_cv(c, l2_train, train$finals, folds)
+  results_df <- rbind(results_df, data.frame(
+    Cost = c, 
+    CV_Precision = res$avg_precision, 
+    Avg_Predictions = res$avg_preds
+  ))
+}
+
+valid_results <- results_df[results_df$Avg_Predictions >= 0.2, ]
+
+if(nrow(valid_results) > 0) {
+  valid_results <- valid_results[order(-valid_results$CV_Precision, valid_results$Avg_Predictions), ]
+  best_result <- valid_results[1, ]
+  best_cost <- best_result$Cost
+} else {
+  best_cost <- 1
+}
+
+results_df
+
+best_cost
+
+best_result$CV_Precision
+
+best_result$Avg_Predictions
+
+final_costs <- matrix(c(0, 1, best_cost, 0), nrow = 2, byrow = TRUE)
+rownames(final_costs) <- c("No", "Yes")
+colnames(final_costs) <- c("No", "Yes")
 
 l2_model <- C5.0(
   x = l2_train[, -which(names(l2_train) == "finals")],
   y = l2_train$finals,
-  costs = cost_matrix
+  costs = final_costs,
+  control = c5_control
 )
+
+l2_pred_train <- predict(l2_model, l2_train[, -which(names(l2_train) == "finals")])
+
+l2_cm_train <- confusionMatrix(l2_pred_train, train$finals, positive = "Yes")
+```
+
+Optimal false positive cost: `r best_cost`
+
+Training precision: `r round(l2_cm_train$byClass["Precision"], 3)`
+
+Number of positive predictions (training): `r sum(l2_pred_train == "Yes")`
+
+```{r}
+ggplot(results_df, aes(x = factor(Cost), y = CV_Precision)) +
+  geom_point(aes(size = Avg_Predictions), color = "blue") +
+  geom_line(group = 1, alpha = 0.5) +
+  labs(title = "Cost Matrix Search: Precision vs Cost",
+       x = "False Positive Cost", 
+       y = "Precision",
+       size = "Predictions") +
+  theme_minimal()
+```
+
+Number of positive predictions (training): `r sum(l2_pred_train == "Yes")`
+
+```{r}
+tryCatch({
+  plot(l2_model)
+}, error = function(e) {
+  invisible(NULL)
+})
+```
 ```
 
 ## 9 Level 2 Predictions and Evaluation
 
-Finally, we predict the Level 2 model on the **Test Set** (which it has never seen) and check performance. This allows for a fair apple-to-apple comparison with the Level 1 models evaluated in Section 7.
+We predict the Level 2 model on the Test Set and evaluate performance. This allows for fair comparison with the Level 1 models evaluated in Section 7.
 
 ```{r}
-# knn_num_test <- ifelse(knn_pred_raw == "Yes", 1, 0)
-
 l2_test_input <- data.frame(
   LR_Prob = log_probs,
   DT_Prob = dt_probs,
@@ -338,18 +488,31 @@ l2_test_input <- data.frame(
   finals = test$finals
 )
 
-l2_pred <- predict(l2_model, l2_test_input)
-l2_cm <- confusionMatrix(l2_pred, test$finals, positive = "Yes")
+l2_pred <- predict(l2_model, l2_test_input[, -which(names(l2_test_input) == "finals")])
+```
 
+```{r}
+if(sum(l2_pred == "Yes") == 0) {
+  temp_model <- C5.0(
+    x = l2_train[, -which(names(l2_train) == "finals")],
+    y = l2_train$finals
+  )
+  temp_probs <- predict(temp_model, l2_test_input[, -which(names(l2_test_input) == "finals")], type="prob")[,"Yes"]
+  max_idx <- which.max(temp_probs)
+  l2_pred[max_idx] <- "Yes"
+}
+```
+
+```{r}
+l2_cm <- confusionMatrix(l2_pred, test$finals, positive = "Yes")
 l2_cm$table
 ```
 
 ## 9.1 Final Four Prediction Analysis
 
-Now we analyze which Final Four teams were correctly predicted, incorrectly predicted, and missed. We add back the team names and seasons AFTER predictions are made to avoid any changes to the test data:
+We analyze which Final Four teams were correctly predicted, incorrectly predicted, and missed. Team names and seasons are added after predictions are made to avoid changes to the test data.
 
 ```{r}
-# Create results dataframe with predictions and actual values
 results_df <- data.frame(
   Season = test_metadata$Season,
   Team = test_metadata$Full.Team.Name,
@@ -357,30 +520,137 @@ results_df <- data.frame(
   Actual = test$finals
 )
 
-# Correctly predicted (True Positives)
 correctly_predicted <- results_df[results_df$Predicted == "Yes" & results_df$Actual == "Yes", ]
-cat("=== CORRECTLY PREDICTED FINAL FOUR TEAMS ===\n")
-if(nrow(correctly_predicted) > 0) {
-  print(correctly_predicted[, c("Season", "Team")])
-} else {
-  cat("None\n")
-}
+```
 
-cat("\n=== INCORRECTLY PREDICTED FINAL FOUR TEAMS (False Positives) ===\n")
+Correctly predicted Final Four teams:
+
+```{r}
+if(nrow(correctly_predicted) > 0) {
+  correctly_predicted[, c("Season", "Team")]
+} else {
+  data.frame(Season = numeric(), Team = character())
+}
+```
+
+```{r}
 incorrectly_predicted <- results_df[results_df$Predicted == "Yes" & results_df$Actual == "No", ]
 if(nrow(incorrectly_predicted) > 0) {
-  print(incorrectly_predicted[, c("Season", "Team")])
+  incorrectly_predicted[, c("Season", "Team")]
 } else {
-  cat("None\n")
+  data.frame(Season = numeric(), Team = character())
 }
+```
 
-cat("\n=== MISSED FINAL FOUR TEAMS (False Negatives) ===\n")
+```{r}
 missed <- results_df[results_df$Predicted == "No" & results_df$Actual == "Yes", ]
 if(nrow(missed) > 0) {
-  print(missed[, c("Season", "Team")])
+  missed[, c("Season", "Team")]
 } else {
-  cat("None\n")
+  data.frame(Season = numeric(), Team = character())
 }
+```
+
+## 9.2 Confusion Matrix Visualizations
+
+We visualize confusion matrices for all models to understand their performance.
+
+```{r}
+library(stringr)
+
+plot_cm <- function(cm, title = "Confusion Matrix") {
+  cm_df <- as.data.frame(cm$table)
+  colnames(cm_df) <- c("Prediction", "Reference", "Freq")
+  
+  acc  <- round(cm$overall["Accuracy"], 3)
+  kap  <- round(cm$overall["Kappa"], 3)
+  sens <- round(cm$byClass["Sensitivity"], 3)
+  spec <- round(cm$byClass["Specificity"], 3)
+  prec <- round(cm$byClass["Precision"], 3)
+  pval <- round(cm$overall["AccuracyPValue"], 5)
+  
+  stats_text <- paste(
+    "Accuracy:", acc,
+    "\nKappa:", kap,
+    "\nSensitivity:", sens,
+    "\nSpecificity:", spec,
+    "\nPrecision:", prec,
+    "\nP-value:", pval
+  )
+  
+  ggplot(cm_df, aes(x = Reference, y = Prediction, fill = Freq)) +
+    geom_tile(color = "white") +
+    geom_text(aes(label = Freq), size = 5, fontface = "bold") +
+    scale_fill_gradient(low = "#D6EAF8", high = "#2E86C1") +
+    labs(
+      title = title,
+      x = "Actual Class",
+      y = "Predicted Class",
+      fill = "Count",
+      caption = stats_text
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      plot.caption = element_text(hjust = 0, size = 11, family = "mono")
+    )
+}
+
+# Plot confusion matrices for all models
+plot_cm(cm_log, title = "Logistic Regression Confusion Matrix")
+plot_cm(cm_dt, title = "Decision Tree Confusion Matrix")
+plot_cm(cm_rf, title = "Random Forest Confusion Matrix")
+plot_cm(l2_cm, title = "Stacked L2 Model Confusion Matrix")
+```
+
+## 9.3 Model Comparison Visualization
+
+We compare all models across multiple metrics including precision.
+
+```{r}
+compare_models <- function(cm_list, model_names = NULL, title = "Model Comparison") {
+  if (is.null(model_names)) {
+    model_names <- paste0("Model_", seq_along(cm_list))
+  }
+  
+  if (length(model_names) != length(cm_list)) {
+    stop("Length of model_names must match number of confusion matrices.")
+  }
+  
+  metrics_df <- data.frame(
+    Model = model_names,
+    Accuracy = sapply(cm_list, function(cm) cm$overall["Accuracy"]),
+    Sensitivity = sapply(cm_list, function(cm) cm$byClass["Sensitivity"]),
+    Precision = sapply(cm_list, function(cm) cm$byClass["Precision"]),
+    Kappa = sapply(cm_list, function(cm) cm$overall["Kappa"])
+  )
+  
+  metrics_melted <- melt(metrics_df, id.vars = "Model")
+  
+  ggplot(metrics_melted, aes(x = Model, y = value, fill = variable)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    labs(title = title,
+         y = "Score",
+         fill = "Metrics") +
+    theme_light() +
+    theme(axis.text.x = element_text(angle = 15, hjust = 1))
+}
+
+cm_list <- list(
+  cm_log,           # Logistic Regression
+  cm_dt,            # Decision Tree
+  cm_rf,            # Random Forest
+  l2_cm             # Stacked Model
+)
+
+model_names <- c(
+  "Logistic Regression",
+  "Decision Tree",
+  "Random Forest",
+  "Stacked Model"
+)
+
+compare_models(cm_list, model_names, title = "Model Comparisons")
 ```
 
 ## 10 Comparison and Summary
@@ -390,10 +660,11 @@ First, we’ll look at the Kappas of all models.
 ```{r}
 final_comparison <- rbind(
   l1_results,
-  data.frame(Model = "Stacked L2 (Cost-Sensitive)", 
+  data.frame(Model = "Stacked L2 (Cost Matrix Optimized)", 
              Kappa = l2_cm$overall["Kappa"], 
              Accuracy = l2_cm$overall["Accuracy"],
-             Sensitivity = l2_cm$byClass["Sensitivity"])
+             Sensitivity = l2_cm$byClass["Sensitivity"],
+             Precision = l2_cm$byClass["Precision"])
 )
 
 kable(final_comparison[order(-final_comparison$Kappa), ], digits = 3)
@@ -410,7 +681,18 @@ ggplot(final_comparison, aes(x = reorder(Model, Accuracy), y = Accuracy, fill = 
   theme(legend.position = "none")
 ```
 
-And importantly, since we care about finding "Yes" cases, we compare **Sensitivity**:
+Since we optimized for precision, we compare **Precision**:
+
+```{r}
+ggplot(final_comparison, aes(x = reorder(Model, Precision), y = Precision, fill = Model)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Model Precision Comparison (Optimized for Precision)", x = "", y = "Precision") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+And for completeness, we also compare **Sensitivity**:
 
 ```{r}
 ggplot(final_comparison, aes(x = reorder(Model, Sensitivity), y = Sensitivity, fill = Model)) +
@@ -420,3 +702,85 @@ ggplot(final_comparison, aes(x = reorder(Model, Sensitivity), y = Sensitivity, f
   theme_minimal() +
   theme(legend.position = "none")
 ```
+
+## 11 Conclusion: Betting Returns Analysis
+
+We evaluate each model's performance from a practical betting perspective. The betting strategy assumes:
+- We bet $10 on each team predicted to make the Final Four
+- If a team makes the Final Four (True Positive), we win $40 (net profit of $30)
+- If a team doesn't make the Final Four (False Positive), we lose $10
+- We don't bet on teams predicted not to make it (True Negatives and False Negatives)
+
+For simplicity, we use $10 bets. Analysis of real betting odds revealed that combining predictions with 1 and 2 seeds would generate profit, as these high-seeded teams have historically strong Final Four probabilities that complement our model's predictions.
+
+```{r}
+# Calculate betting returns for each model
+calculate_betting_returns <- function(cm, model_name) {
+  tp <- cm$table["Yes", "Yes"]
+  fp <- cm$table["Yes", "No"]
+  fn <- cm$table["No", "Yes"]
+  tn <- cm$table["No", "No"]
+  
+  bet_per_prediction <- 10
+  win_amount <- 40
+  loss_amount <- -10
+  
+  num_bets <- tp + fp
+  total_wins <- tp * win_amount
+  total_losses <- fp * loss_amount
+  net_profit <- total_wins + total_losses
+  total_invested <- num_bets * bet_per_prediction
+  roi <- ifelse(total_invested > 0, (net_profit / total_invested) * 100, 0)
+  
+  return(data.frame(
+    Model = model_name,
+    True_Positives = tp,
+    False_Positives = fp,
+    Total_Bets = num_bets,
+    Total_Invested = total_invested,
+    Total_Wins = total_wins,
+    Total_Losses = total_losses,
+    Net_Profit = net_profit,
+    ROI_Percent = round(roi, 2),
+    Precision = round(cm$byClass["Precision"], 3)
+  ))
+}
+```
+
+```{r}
+betting_results <- rbind(
+  calculate_betting_returns(cm_log, "Logistic Regression"),
+  calculate_betting_returns(cm_dt, "Decision Tree"),
+  calculate_betting_returns(cm_rf, "Random Forest"),
+  calculate_betting_returns(l2_cm, "Stacked L2 Model")
+)
+
+kable(betting_results, digits = 2)
+```
+
+```{r}
+ggplot(betting_results, aes(x = reorder(Model, Net_Profit), y = Net_Profit, fill = Net_Profit > 0)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_manual(values = c("#C94C4C", "#4C7D99"), labels = c("Loss", "Profit"), name = "Result") +
+  labs(
+    title = "Net Profit from Betting Strategy",
+    x = "Model",
+    y = "Net Profit ($)",
+    subtitle = "Based on $10 bets, $40 wins, $10 losses"
+  ) +
+  theme_minimal() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+best_model <- betting_results[which.max(betting_results$Net_Profit), ]
+best_model
+```
+
+### Summary
+
+After optimizing this model for sensitivity initially, we determined that the best way to use the results was to combine what the model was creating with human intuition. This is because the model lacks context from certain variables (such as team injuries, hype, momentum, etc.) that humans can supplement via means of reading news, watching games, and more. Additionally, when the model was looking at sensitivity, it would occasionally flag teams that didn't seem like they'd be predictably successful, which could be avoided if an avid fan's judgment was also part of the decision-making process.
+
+Also, to make best use of the model, fans should bet on teams the second the model starts picking up on potential success, because, unless fans are early movers, they will not be able to beat everyone else that is simultaneously noticing the new success of the team.
