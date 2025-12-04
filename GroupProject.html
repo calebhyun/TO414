@@ -1751,6 +1751,83 @@ table(br_filtered$cluster)</code></pre>
 <pre><code>## 
 ##    1    3 
 ## 1143  947</code></pre>
+<p>Now let’s examine key features that differentiate the clusters. We
+focus on four critical metrics that capture fundamental differences in
+team performance: Block Percentage (defensive presence), Offensive
+Efficiency (raw offensive output), Adjusted Offensive Efficiency
+(pace-adjusted offense), and Net Rating (overall team strength).</p>
+<pre class="r"><code># Get all numeric features (excluding finals, cluster, and metadata/temporal variables)
+# Exclude Season and other non-performance identifiers
+metadata_cols &lt;- c(&quot;finals&quot;, &quot;cluster&quot;, &quot;Season&quot;)
+feature_cols &lt;- setdiff(names(br_minmax), metadata_cols)
+
+# Calculate means for all features by cluster
+cluster_means_all &lt;- br_minmax %&gt;%
+  group_by(cluster) %&gt;%
+  summarise(across(all_of(feature_cols), ~ mean(.x, na.rm = TRUE)), .groups = &#39;drop&#39;)
+
+# Transpose for better readability (features as rows, clusters as columns)
+cluster_means_melted &lt;- melt(cluster_means_all, id.vars = &quot;cluster&quot;, variable.name = &quot;Feature&quot;, value.name = &quot;Mean&quot;)
+cluster_means_transposed &lt;- dcast(cluster_means_melted, Feature ~ cluster, value.var = &quot;Mean&quot;)
+names(cluster_means_transposed)[-1] &lt;- paste0(&quot;Cluster_&quot;, names(cluster_means_transposed)[-1])
+
+# Select only the specific features of interest
+selected_features &lt;- c(&quot;BlockPct&quot;, &quot;OE&quot;, &quot;AdjOE&quot;, &quot;Net.Rating&quot;)
+top_features &lt;- cluster_means_transposed %&gt;%
+  filter(Feature %in% selected_features) %&gt;%
+  arrange(match(Feature, selected_features))
+
+# Display the selected features
+knitr::kable(top_features, digits = 4, caption = &quot;Key Differentiating Features Across Clusters&quot;)</code></pre>
+<table>
+<caption>Key Differentiating Features Across Clusters</caption>
+<thead>
+<tr class="header">
+<th align="left">Feature</th>
+<th align="right">Cluster_1</th>
+<th align="right">Cluster_2</th>
+<th align="right">Cluster_3</th>
+<th align="right">Cluster_4</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">BlockPct</td>
+<td align="right">0.4783</td>
+<td align="right">0.4034</td>
+<td align="right">0.5057</td>
+<td align="right">0.3868</td>
+</tr>
+<tr class="even">
+<td align="left">OE</td>
+<td align="right">0.8600</td>
+<td align="right">0.7870</td>
+<td align="right">0.8477</td>
+<td align="right">0.8004</td>
+</tr>
+<tr class="odd">
+<td align="left">AdjOE</td>
+<td align="right">0.6388</td>
+<td align="right">0.4295</td>
+<td align="right">0.6190</td>
+<td align="right">0.4563</td>
+</tr>
+<tr class="even">
+<td align="left">Net.Rating</td>
+<td align="right">0.6715</td>
+<td align="right">0.4429</td>
+<td align="right">0.6747</td>
+<td align="right">0.4422</td>
+</tr>
+</tbody>
+</table>
+<p>The features shown above highlight the core differences between team
+archetypes. Block Percentage distinguishes defensive-oriented teams
+(Cluster 3 has the highest), while Offensive Efficiency and Adjusted
+Offensive Efficiency separate elite offensive teams (Cluster 1) from
+lower-performing clusters. Net Rating provides an overall measure of
+team strength, with Clusters 1 and 3 (the elite teams) showing
+significantly higher values than Clusters 2 and 4.</p>
 <p>The analysis identified four unique team archetypes, categorized into
 “Elite” or “Bad”.</p>
 <p><strong>Tier 1: Elite Teams</strong></p>
@@ -1812,9 +1889,9 @@ Regression, Decision Tree, Random Forest) on the training set. We use
 cost matrix optimization in Level 2 to handle class imbalance.</li>
 <li><strong>Generate Level 1 Predictions</strong>:
 <ul>
-<li>Predict on <strong>training set</strong> → used as features for
-Level 2 training</li>
-<li>Predict on <strong>test set</strong> → used for final
+<li>Predict on <strong>training set</strong>, which will used as
+features for Level 2 training</li>
+<li>Predict on <strong>test set</strong>, which will be used for final
 evaluation</li>
 </ul></li>
 <li><strong>Train Level 2 Model</strong>: Build stacked model using
@@ -2128,30 +2205,20 @@ if(nrow(valid_results) &gt; 0) {
   best_cost &lt;- best_result$Cost
 } else {
   best_cost &lt;- 1
-}
-
-results_df</code></pre>
-<pre><code>##    Cost CV_Precision Avg_Predictions
-## 1     1    0.9527778             7.6
-## 2     5    0.9750000             7.4
-## 3    10    0.9750000             7.4
-## 4    15    0.9750000             7.4
-## 5    20    0.0000000             0.0
-## 6    25    0.0000000             0.0
-## 7    30    0.0000000             0.0
-## 8    35    0.0000000             0.0
-## 9    40    0.0000000             0.0
-## 10   45    0.0000000             0.0
-## 11   50    0.0000000             0.0
-## 12   60    0.0000000             0.0
-## 13   75    0.0000000             0.0
-## 14  100    0.0000000             0.0</code></pre>
-<pre class="r"><code>best_cost</code></pre>
-<pre><code>## [1] 5</code></pre>
-<pre class="r"><code>best_result$CV_Precision</code></pre>
-<pre><code>## [1] 0.975</code></pre>
-<pre class="r"><code>best_result$Avg_Predictions</code></pre>
-<pre><code>## [1] 7.4</code></pre>
+}</code></pre>
+<p>The cost matrix optimization process revealed an important trade-off
+between training performance and generalization. During cross-validation
+on the training set, we achieved excellent precision (0.975) with cost
+values between 5 and 15, which suggested that the model was successfully
+learning to minimize false positives. However, this high precision on
+the training data was indicative of overfitting. The cost matrix
+optimization led the model to become overly conservative and tuned to
+the specific patterns present in the training set, rather than learning
+generalizable rules that would transfer to unseen data. We decided to
+use a cost value of 5, but this did not work well for our test data
+(maybe because we just didn’t have enough data: in total, we only had
+.7<em>14</em>4 = 39 final four teams in the training data, and
+.3<em>14</em>4 = 17 final four teams in the test data).</p>
 <pre class="r"><code>final_costs &lt;- matrix(c(0, 1, best_cost, 0), nrow = 2, byrow = TRUE)
 rownames(final_costs) &lt;- c(&quot;No&quot;, &quot;Yes&quot;)
 colnames(final_costs) &lt;- c(&quot;No&quot;, &quot;Yes&quot;)
@@ -2475,7 +2542,7 @@ stacked model, the Random Forest precision is still best. This is due to
 the fact that, as explained above, the cost matrix optimization can’t
 fine-tune precision beyond a certain point. We saw that the L2 model
 overfitted to the training data, and the Random Forest model was the
-best at generalizing to the test data.</p>
+best at generalizing to the test data (in terms of precision).</p>
 <p>Before our presentation on Tuesday, we tried to optimize for
 Sensitivity, because we wanted to capture the opportunity cost of
 missing a team that could have made the final four.
@@ -2651,19 +2718,17 @@ best_model</code></pre>
 ## Precision     0.409</code></pre>
 <div id="summary" class="section level3">
 <h3>Summary</h3>
-<p>After optimizing this model for sensitivity initially, we can see
-through the data that the most precise models (Random Forest) were the
-ones that made the most money. In our initial analysis when we decided
-to optimize for sensitivity, we overvalued opportunity cost instead of
-just focusing on the actual cash on the table. Additionally, we
-determined that the best way to use the results was to combine what the
-model was creating with human intuition. This is because the model lacks
-context from certain variables (such as team injuries, hype, momentum,
-etc.) that humans can supplement via means of reading news, watching
-games, and more. Additionally, when the model was looking at
-sensitivity, it would occasionally flag teams that didn’t seem like
-they’d be predictably successful, which could be avoided if an avid
-fan’s judgment was also part of the decision-making process.</p>
+<p>After optimizing this model for precision, we actually saw through
+the data that the most sensitive models (Logistic Regression) were the
+ones that made the most money. Additionally, we determined that the best
+way to use the results was to combine what the model was creating with
+human intuition. This is because the model lacks context from certain
+variables (such as team injuries, hype, momentum, etc.) that humans can
+supplement via reading news, watching games, and more. Additionally,
+when the model was looking at sensitivity, it would occasionally flag
+teams that didn’t seem like they’d be predictably successful, which
+could be avoided if an avid fan’s judgment was also part of the
+decision-making process.</p>
 <p>Also, to make best use of the model, fans should bet on teams the
 second the model starts picking up on potential success, because, unless
 fans are early movers, they will not be able to beat everyone else that
